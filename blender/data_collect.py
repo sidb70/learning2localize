@@ -4,11 +4,21 @@ import bpy_extras
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 import json
+from pydantic import BaseModel, Field
+from typing import List, Tuple, Dict
+
+
+class AppleSample(BaseModel):
+    apple_id: int = Field(..., description="ID of the apple")
+    apple_name: str = Field(..., description="Name of the apple object")
+    apple_bbox: List[float] = Field(..., description="Bounding box of the apple in world coordinates")
+    apple_ndc_bbox: List[float] = Field(..., description="Bounding box of the apple in NDC coordinates")
+    apple_center: List[float] = Field(..., description="Center point of the apple surface in world coordinates")
+    apple_ndc_center: List[float] = Field(..., description="Center point of the apple surface in NDC coordinates")
+
 
 
 def save_rgbd(res_x=1280, res_y=720,
-                         max_distance=1.8,
-                         depth_mode='PNG',          # or 'EXR'
                          path_stem="/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard",
                          frame=None):
     """
@@ -38,24 +48,15 @@ def save_rgbd(res_x=1280, res_y=720,
     nt = scn.node_tree
     nt.nodes.clear()
 
-    rl   = nt.nodes.new("CompositorNodeRLayers")              # Render Layers 
+    rlayer = nt.nodes.new("CompositorNodeRLayers")
 
-    # Depth output node
-    depth_out = nt.nodes.new("CompositorNodeOutputFile")      
-    depth_out.base_path = os.path.dirname(bpy.path.abspath(path_stem))
+    # depth ➜ EXR
+    depth_out               = nt.nodes.new("CompositorNodeOutputFile")
+    depth_out.base_path     = os.path.dirname(bpy.path.abspath(path_stem))
     depth_out.file_slots[0].path = os.path.basename(path_stem) + "_depth"
-
-    if depth_mode.upper() == 'EXR':
-        depth_out.format.file_format = 'OPEN_EXR';  depth_out.format.color_depth = '32';  depth_ext = ".exr"
-        nt.links.new(rl.outputs['Depth'], depth_out.inputs[0])                    # connect Z pass 
-    else:                                                                         # 16‑bit greyscale PNG
-        mapr = nt.nodes.new("CompositorNodeMapRange")
-        mapr.inputs["From Max"].default_value = max_distance
-        mapr.inputs["To Min"].default_value   = 0.0
-        mapr.inputs["To Max"].default_value   = 1.0
-        nt.links.new(rl.outputs['Depth'], mapr.inputs[0])
-        depth_out.format.file_format = 'PNG'; depth_out.format.color_mode = 'BW'; depth_out.format.color_depth = '16'
-        nt.links.new(mapr.outputs[0], depth_out.inputs[0]);  depth_ext = ".png"
+    depth_out.format.file_format  = 'OPEN_EXR'
+    depth_out.format.color_depth  = '32'
+    nt.links.new(rlayer.outputs['Depth'], depth_out.inputs[0])  # ← raw Z pass
 
     # RGB output node
     rgb_out = nt.nodes.new("CompositorNodeOutputFile")
@@ -64,7 +65,7 @@ def save_rgbd(res_x=1280, res_y=720,
     rgb_out.format.file_format = 'PNG'        # tonemapped sRGB 
     rgb_out.format.color_mode  = 'RGB'
     rgb_out.format.color_depth = '8'
-    nt.links.new(rl.outputs['Image'], rgb_out.inputs[0])       # Combined pass is 'Image' 
+    nt.links.new(rlayer.outputs['Image'], rgb_out.inputs[0])       # Combined pass is 'Image' 
 
     # ---------- set up object indexing ----------------------
     for i, obj in enumerate(
@@ -91,13 +92,13 @@ def save_rgbd(res_x=1280, res_y=720,
 
 
     # connect the pass
-    nt.links.new(rl.outputs['IndexOB'], id_out.inputs[0])
+    nt.links.new(rlayer.outputs['IndexOB'], id_out.inputs[0])
 
     # ---------- render one frame -------------------------------
     bpy.ops.render.render(write_still=True)
 
     depth_path = os.path.join(depth_out.base_path,
-                              f"{depth_out.file_slots[0].path}{frame:04d}{depth_ext}")
+                              f"{depth_out.file_slots[0].path}{frame:04d}.exr")
     rgb_path   = os.path.join(rgb_out.base_path,
                               f"{rgb_out.file_slots[0].path}{frame:04d}.png")
     id_path = os.path.join(id_out.base_path,
@@ -130,18 +131,15 @@ def depth_to_point_cloud(depth_path,
         'Linear Rec.709'  if 'Linear Rec.709'  in enum else
         'Non-Color')
 
-    W, H, C = *img.size, img.channels
-    depth = np.array(img.pixels[:], np.float32).reshape(H, W, C)[..., 0]
+    W, H = img.size
+    depth = np.array(img.pixels[:], np.float32).reshape(H, W, img.channels)[..., 0]
 
+    # apply scene‑unit scale ONCE
+    depth *= (bpy.context.scene.unit_settings.scale_length or 1.0)  # :contentReference[oaicite:4]{index=4}
 
-    scale = bpy.context.scene.unit_settings.scale_length or 1.0 
-    depth *= scale
-    
-    
-    if depth_path.lower().endswith('.png') and C == 1:
-        depth *= max_distance                           
-
-    fx = (W/2)/math.tan(cam.data.angle_x/2);  fy = (H/2)/math.tan(cam.data.angle_y/2)
+    # back‑project
+    fx = (W/2)/math.tan(cam.data.angle_x/2)
+    fy = (H/2)/math.tan(cam.data.angle_y/2)
     cx, cy = W/2, H/2
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     z  = depth
@@ -153,11 +151,17 @@ def depth_to_point_cloud(depth_path,
         xyz  = np.array([R @ Vector(p) for p in flat], np.float32).reshape(H, W, 3)
 
     bpy.data.images.remove(img)
-    
-    # rotate 180 degrees and flip around y-axis
-    transformed_pc = np.rot90(xyz, 2)
-    transformed_pc = transformed_pc[:,::-1, :]
-    return transformed_pc
+
+    clip_far = cam.data.clip_end           # e.g. 100 m
+    bad = depth >= clip_far * 0.999        # “almost far” or bigger ⇒ background
+    depth[bad] = np.nan                    # or = clip_far if you prefer
+
+    xyz = np.stack([(uu-cx)*depth/fx, -(vv-cy)*depth/fy, -depth], -1)
+    xyz[~np.isfinite(xyz)] = np.nan        # drop NaNs/Infs that slipped through
+
+    # optional 180° rot & flip to match your previous orientation
+    xyz = np.rot90(xyz, 2)[:, ::-1, :]
+    return xyz
 
 
 def get_world_bounding_box(obj):
@@ -166,28 +170,6 @@ def get_world_bounding_box(obj):
     # Convert to world space
     world_bbox_corners = [obj.matrix_world @ corner for corner in local_bbox_corners]
     return world_bbox_corners
-
-
-def print_bboxes():
-    # Loop through all mesh objects in the scene
-    min_corner = Vector((float('inf'), float('inf'), float('inf')))
-    max_corner = Vector((float('-inf'), float('-inf'), float('-inf')))
-    for obj in bpy.context.scene.objects:
-        if obj.type == 'MESH' and 'apple' in obj.name:
-            bbox = get_world_bounding_box(obj)
-            for corner in bbox:
-                min_corner = Vector((min(min_corner.x, corner.x),
-                                     min(min_corner.y, corner.y),
-                                     min(min_corner.z, corner.z)))
-                max_corner = Vector((max(max_corner.x, corner.x),
-                                     max(max_corner.y, corner.y),
-                                     max(max_corner.z, corner.z)))
-            print(f"Object: {obj.name}")
-            print(f"  Bounding Box corners: {bbox}")
-
-    print(f"Global Min Corner: {min_corner}")
-    print(f"Global Max Corner: {max_corner}")
-    
 
 def get_bbox(obj, cam=None, scene=None):
     """
@@ -316,6 +298,10 @@ def get_apple_center(apple_id):
     for obj in bpy.data.objects:
         if 'test' in obj.name: continue
         obj.hide_render = False  # make all objects visible in render again
+def get_apple_ground_truth(apple_id):
+    '''
+    '''
+    pass
 if __name__ == "__main__":
     # get_apple_center(8)
     # box_dict = get_visible_apple_boxes()
@@ -336,8 +322,6 @@ if __name__ == "__main__":
 
 
     depth_png, rgb_png, idx_png, id_mapping_json = save_rgbd(res_x=1280, res_y=720,
-                                             max_distance=1.8,
-                                             depth_mode='PNG',
                                              path_stem=stem)
 
     cloud = depth_to_point_cloud(depth_png, max_distance=1.8, as_world=False)
