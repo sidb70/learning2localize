@@ -1,5 +1,8 @@
-dataset/
+*.json
 *.ply
 *.png
 *.npy
 *.blend
+*.blend1
+*.exr
+render*

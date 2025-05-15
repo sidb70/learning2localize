@@ -3,14 +3,13 @@ import bmesh
 import bpy_extras
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+import json
 
 
-
-
-def save_depth_rgb_fast(res_x=1280, res_y=720,
+def save_rgbd(res_x=1280, res_y=720,
                          max_distance=1.8,
                          depth_mode='PNG',          # or 'EXR'
-                         path_stem="/home/siddhartha/RIVAL/blender/apple_orchard",
+                         path_stem="/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard",
                          frame=None):
     """
     Render once and save
@@ -19,6 +18,8 @@ def save_depth_rgb_fast(res_x=1280, res_y=720,
     Returns (depth_path, rgb_path).
     """
     scn   = bpy.context.scene
+    scn.render.resolution_x = res_x # set user-defined resolution
+    scn.render.resolution_y = res_y
     cam   = scn.camera or scn.objects['Camera']
     frame = frame or scn.frame_current
 
@@ -65,6 +66,33 @@ def save_depth_rgb_fast(res_x=1280, res_y=720,
     rgb_out.format.color_depth = '8'
     nt.links.new(rl.outputs['Image'], rgb_out.inputs[0])       # Combined pass is 'Image' 
 
+    # ---------- set up object indexing ----------------------
+    for i, obj in enumerate(
+        [o for o in bpy.context.scene.objects if o.type == 'MESH']):
+        obj.pass_index = i + 1          # 0 is “background”, start at 1
+
+    view_layer = bpy.context.view_layer          # <‑‑ active ViewLayer handle
+    view_layer.use_pass_object_index = True      # enable the ID pass
+
+    # Object index output node
+    id_out = nt.nodes.new("CompositorNodeOutputFile")
+    id_out.base_path = depth_out.base_path
+    id_out.file_slots[0].path = os.path.basename(path_stem) + "_id"
+    id_out.format.file_format  = 'OPEN_EXR'   # keeps integer indices intact
+    id_out.format.color_mode   = 'BW'
+    id_out.format.color_depth  = '32'
+
+    ## write the object index mapping to a json file for later use
+    mapping = {obj.pass_index: obj.name
+           for obj in bpy.context.scene.objects
+           if obj.type == 'MESH' and obj.pass_index != 0}
+    with open(os.path.join(id_out.base_path, f"{path_stem}_id_map.json"), "w") as f:
+        json.dump(mapping, f, indent=2)
+
+
+    # connect the pass
+    nt.links.new(rl.outputs['IndexOB'], id_out.inputs[0])
+
     # ---------- render one frame -------------------------------
     bpy.ops.render.render(write_still=True)
 
@@ -72,10 +100,17 @@ def save_depth_rgb_fast(res_x=1280, res_y=720,
                               f"{depth_out.file_slots[0].path}{frame:04d}{depth_ext}")
     rgb_path   = os.path.join(rgb_out.base_path,
                               f"{rgb_out.file_slots[0].path}{frame:04d}.png")
+    id_path = os.path.join(id_out.base_path,
+                       f"{id_out.file_slots[0].path}{frame:04d}.exr")
+    id_mapping_path = os.path.join(id_out.base_path,
+                       f"{path_stem}_id_map.json")
+
 
     print("Depth saved →", depth_path)
     print("RGB   saved →", rgb_path)
-    return depth_path, rgb_path
+    print("ID    saved →", id_path)
+    print("ID mapping saved →", id_mapping_path)
+    return depth_path, rgb_path, id_path, id_mapping_path
 
 
 def depth_to_point_cloud(depth_path,
@@ -153,90 +188,74 @@ def print_bboxes():
     print(f"Global Min Corner: {min_corner}")
     print(f"Global Max Corner: {max_corner}")
     
-def is_bbox_visible(obj,
-                    cam=None,
-                    scene=None,
-                    margin: float = 0.0) -> bool:
+
+def get_bbox(obj, cam=None, scene=None):
     """
-    True if *any* corner of the (evaluated) bounding box falls
-    inside the camera’s 2‑D frame and between its near/far clips.
-
-    Parameters
-    ----------
-    obj : bpy.types.Object
-        The object to test (must be of type 'MESH').
-    cam : bpy.types.Object, optional
-        Camera to test against (defaults to scene.camera).
-    scene : bpy.types.Scene, optional
-        Scene providing render settings (defaults to bpy.context.scene).
-    margin : float
-        Grows/Shrinks the 2‑D test rectangle by ±margin in NDC
-        (e.g. ‑0.02 lets the function accept boxes a smidge outside).
-
-    Returns
-    -------
-    bool
+    Returns:
+        world_bbox: List of 8 Vector corners in world space.
+        ndc_bbox: (x_min, y_min, x_max, y_max) in normalized device coordinates.
     """
-    scene = scene or bpy.context.scene
-    cam   = cam   or scene.camera
-    if cam is None or cam.type != 'CAMERA':
-        raise ValueError("No valid camera specified")
-
-    # Include modifiers / constraints
-    deps = bpy.context.evaluated_depsgraph_get()
-    obj_e = obj.evaluated_get(deps)
-
-    # Clip‑plane distances in camera space
-    clip_start, clip_end = cam.data.clip_start, cam.data.clip_end
-    m_world_to_cam = cam.matrix_world.inverted()
-
-    for corner in obj_e.bound_box:                      # local → world
-        world_co = obj_e.matrix_world @ Vector(corner)
-        cam_co   = m_world_to_cam @ world_co            # world → camera
-        # test depth first (‑Z forward in camera space)
-        depth = -cam_co.z
-        if not (clip_start <= depth <= clip_end):
-            continue
-
-        ndc = bpy_extras.object_utils.world_to_camera_view(scene, cam, world_co)
-        if (margin <= ndc.x <= 1 - margin and
-            margin <= ndc.y <= 1 - margin and
-            ndc.z >= 0.0):
-            return True                                # at least one corner is in‑frame
-    return False
-
-def get_visible_apple_boxes(
-                       cam=None,
-                       scene=None,
-                       margin=0.0):
-    """
-    Returns {object_name: [world‑space bbox corners]} for
-    all visible mesh objects whose name contains *mask*.
-    """
-    scene = scene or bpy.context.scene
-    boxes = {}
-    for ob in scene.objects:
-        if (ob.type == 'MESH' and 'apple' in ob.name and 'stem' not in ob.name and
-                is_bbox_visible(ob, cam, scene, margin)):
-            boxes[ob.name] = [ob.matrix_world @ Vector(c)
-                              for c in ob.bound_box]
-    return boxes
-
-def ndc_center_of_bbox(obj, cam=None, scene=None):
-    """Return (x_ndc, y_ndc) mid‑point of obj's projected AABB."""
     scene = scene or bpy.context.scene
     cam   = cam   or scene.camera
     deps  = bpy.context.evaluated_depsgraph_get()
     obj_e = obj.evaluated_get(deps)
 
-    # project each corner to NDC ------------------------------
-    ndc = [bpy_extras.object_utils.world_to_camera_view(
-               scene, cam, obj_e.matrix_world @ Vector(c))
-           for c in obj_e.bound_box]
+    # World-space AABB corners
+    world_bbox = [obj_e.matrix_world @ Vector(c) for c in obj_e.bound_box]
 
-    xs, ys = zip(*[(c.x, c.y) for c in ndc if c.z >= 0.0])
-    return (min(xs)+max(xs))*0.5, (min(ys)+max(ys))*0.5
+    # Project to NDC
+    ndc_coords = [
+        bpy_extras.object_utils.world_to_camera_view(scene, cam, corner)
+        for corner in world_bbox
+    ]
 
+    # Only include points in front of the camera (z >= 0)
+    xs, ys = zip(*[(p.x, p.y) for p in ndc_coords if p.z >= 0.0])
+
+    if not xs or not ys:
+        # All points are behind the camera, return dummy bbox
+        ndc_bbox = (1.0, 1.0, 0.0, 0.0)
+    else:
+        ndc_bbox = (min(xs), min(ys), max(xs), max(ys))
+
+    return world_bbox, ndc_bbox
+
+
+def ndc_center_of_bbox(obj, cam=None, scene=None):
+    """Return (x_ndc, y_ndc) midpoint of obj's projected AABB."""
+    _, (x_min, y_min, x_max, y_max) = get_bbox(obj, cam, scene)
+    x_ndc = (x_min + x_max) * 0.5
+    y_ndc = (y_min + y_max) * 0.5
+    return x_ndc, y_ndc
+def is_visible(obj, cam=None, scene=None, margin=0.0):
+    """
+    Return True if the NDC bounding box of the object intersects the camera's view (0..1 in x and y),
+    optionally extended by a margin.
+    """
+    world_bbox, bbox_ndc = get_bbox(obj, cam, scene)
+
+    x_min, y_min, x_max, y_max = bbox_ndc
+
+    # Bounding box must overlap with screen space [0,1] (with margin)
+    in_x = (x_max >= 0.0 - margin) and (x_min <= 1.0 + margin)
+    in_y = (y_max >= 0.0 - margin) and (y_min <= 1.0 + margin)
+
+    return in_x and in_y
+def get_visible_apple_boxes(
+                       cam=None,
+                       scene=None,
+                       margin=0.0):
+    """
+    Returns {object_name: [camera-space bbox corners]} for
+    all visible mesh objects whose name contains *mask*.
+    """
+    scene = scene or bpy.context.scene
+    boxes = {}
+    for ob in scene.objects:
+        if (ob.type == 'MESH' and 'apple' in ob.name and 'stem' not in ob.name) \
+            and is_visible(ob, cam, scene, margin):
+                boxes[ob.name] = get_bbox(ob, cam, scene)
+    return boxes
 
 def surface_point_at_bbox_center(obj, cam=None, scene=None, max_dist=1e6):
     scene = scene or bpy.context.scene
@@ -298,10 +317,14 @@ def get_apple_center(apple_id):
         if 'test' in obj.name: continue
         obj.hide_render = False  # make all objects visible in render again
 if __name__ == "__main__":
-    get_apple_center(8)
-#    print(get_visible_apple_boxes())
-#   print_bboxes()
-    stem = "/home/siddhartha/RIVAL/blender/apple_orchard"
+    # get_apple_center(8)
+    # box_dict = get_visible_apple_boxes()
+    # for k, v in box_dict.items():
+    #     print(f"Object: {k}")
+    #     print(f"  World BBox corners: {v[0]}")
+    #     print(f"  NDC BBox: {v[1]}")
+    
+    stem = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard"
     
 #    for collection in ['foliage', 'stems'=, 'branches']:
 #        col = bpy.data.collections.get(collection)     # replace with your collection name
@@ -312,7 +335,7 @@ if __name__ == "__main__":
 #            print("No collection", collection)
 
 
-    depth_png, rgb_png = save_depth_rgb_fast(res_x=1280, res_y=720,
+    depth_png, rgb_png, idx_png, id_mapping_json = save_rgbd(res_x=1280, res_y=720,
                                              max_distance=1.8,
                                              depth_mode='PNG',
                                              path_stem=stem)
