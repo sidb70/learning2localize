@@ -11,12 +11,18 @@ from typing import List, Tuple, Dict
 class AppleSample(BaseModel):
     apple_id: int = Field(..., description="ID of the apple")
     apple_name: str = Field(..., description="Name of the apple object")
-    apple_bbox: List[float] = Field(..., description="Bounding box of the apple in world coordinates")
-    apple_ndc_bbox: List[float] = Field(..., description="Bounding box of the apple in NDC coordinates")
-    apple_center: List[float] = Field(..., description="Center point of the apple surface in world coordinates")
-    apple_ndc_center: List[float] = Field(..., description="Center point of the apple surface in NDC coordinates")
-
-
+    apple_bbox: List[float] = Field(..., description="Bounding box of the apple in camera pixel coordinates")
+    apple_center: List[float] = Field(..., description="Center of the apple surface from the view of the camera in camera coordinates")
+    def __repr__(self):
+        return f"AppleSample(\napple_id={self.apple_id},\n" \
+               f"apple_name='{self.apple_name}',\n" \
+               f"apple_bbox={self.apple_bbox},\n" \
+                f"apple_center={self.apple_center},\n"
+    def __str__(self):
+        return f"Apple ID: {self.apple_id}\n" \
+               f"Apple Name: {self.apple_name}\n" \
+               f"Apple BBox: {self.apple_bbox}\n" \
+               f"Apple Center: {self.apple_center}\n"
 
 def save_rgbd(res_x=1280, res_y=720,
                          path_stem="/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard",
@@ -71,6 +77,8 @@ def save_rgbd(res_x=1280, res_y=720,
     for i, obj in enumerate(
         [o for o in bpy.context.scene.objects if o.type == 'MESH']):
         obj.pass_index = i + 1          # 0 is “background”, start at 1
+        if 'test' in obj.name:
+            obj.hide_render = True
 
     view_layer = bpy.context.view_layer          # <‑‑ active ViewLayer handle
     view_layer.use_pass_object_index = True      # enable the ID pass
@@ -163,7 +171,6 @@ def depth_to_point_cloud(depth_path,
     xyz = np.rot90(xyz, 2)[:, ::-1, :]
     return xyz
 
-
 def get_world_bounding_box(obj):
     # Local bounding box corners
     local_bbox_corners = [Vector(corner) for corner in obj.bound_box]
@@ -171,41 +178,62 @@ def get_world_bounding_box(obj):
     world_bbox_corners = [obj.matrix_world @ corner for corner in local_bbox_corners]
     return world_bbox_corners
 
-def get_bbox(obj, cam=None, scene=None):
+
+def get_bbox(obj,
+                   cam: bpy.types.Object = None,
+                   scene: bpy.types.Scene = None,
+                   z_clip: float = 0.0,
+                   world: bool=False):
     """
+    Return the 2D bounding box of the object from the camera's perspective.
+    If world=True, return the 3D bounding box corners in world coordinates.
+    The 2D bounding box is in normalized device coordinates (NDC) [0..1]².
+
     Returns:
-        world_bbox: List of 8 Vector corners in world space.
-        ndc_bbox: (x_min, y_min, x_max, y_max) in normalized device coordinates.
+        - bbox: (x_min, y_min, x_max, y_max) in either NDC or world coordinates
+
     """
     scene = scene or bpy.context.scene
     cam   = cam   or scene.camera
     deps  = bpy.context.evaluated_depsgraph_get()
-    obj_e = obj.evaluated_get(deps)
 
-    # World-space AABB corners
-    world_bbox = [obj_e.matrix_world @ Vector(c) for c in obj_e.bound_box]
+    # --- get the evaluated mesh  ---------------
+    obj_eval = obj.evaluated_get(deps)
+    mesh_eval = obj_eval.to_mesh()          # temporary, must be freed later
 
-    # Project to NDC
-    ndc_coords = [
-        bpy_extras.object_utils.world_to_camera_view(scene, cam, corner)
-        for corner in world_bbox
-    ]
+    # --- project every vertex -------------------------------------
+    xs, ys = [], []
+    for v in mesh_eval.vertices:
+        # world coordinate of the vertex
+        p_world = obj_eval.matrix_world @ v.co
+        # NDC = (x,y,z) in [0,1]² × [0,1]  (Blender: +Y is up, origin bottom‑left)
+        p_ndc   = bpy_extras.object_utils.world_to_camera_view(scene, cam, p_world)
+        if p_ndc.z >= z_clip:               # keep only points in front of camera
+            xs.append(p_ndc.x)
+            ys.append(p_ndc.y)
 
-    # Only include points in front of the camera (z >= 0)
-    xs, ys = zip(*[(p.x, p.y) for p in ndc_coords if p.z >= 0.0])
+    # free the temp mesh to avoid leaks
+    obj_eval.to_mesh_clear()
 
-    if not xs or not ys:
-        # All points are behind the camera, return dummy bbox
-        ndc_bbox = (1.0, 1.0, 0.0, 0.0)
+    if not xs:
+        # everything is behind the camera: return an empty bbox
+        box = (1.0, 1.0, 0.0, 0.0)
     else:
-        ndc_bbox = (min(xs), min(ys), max(xs), max(ys))
+        box = (min(xs), min(ys), max(xs), max(ys))
 
-    return world_bbox, ndc_bbox
+    if world:
+        box = [obj_eval.matrix_world @ Vector(c) for c in obj_eval.bound_box]
+    return box
 
+def ndc_to_pixel(ndc_xy, res_x, res_y):
+    """NDC (0..1, bottom‑left) → integer pixel coordinates (top‑left origin)."""
+    x_pix = ndc_xy[0] * res_x
+    y_pix = (1.0 - ndc_xy[1]) * res_y   # flip Y to top‑left origin
+    return round(x_pix), round(y_pix)
 
 def ndc_center_of_bbox(obj, cam=None, scene=None):
     """Return (x_ndc, y_ndc) midpoint of obj's projected AABB."""
-    _, (x_min, y_min, x_max, y_max) = get_bbox(obj, cam, scene)
+    (x_min, y_min, x_max, y_max) = get_bbox(obj, cam, scene)
     x_ndc = (x_min + x_max) * 0.5
     y_ndc = (y_min + y_max) * 0.5
     return x_ndc, y_ndc
@@ -214,7 +242,7 @@ def is_visible(obj, cam=None, scene=None, margin=0.0):
     Return True if the NDC bounding box of the object intersects the camera's view (0..1 in x and y),
     optionally extended by a margin.
     """
-    world_bbox, bbox_ndc = get_bbox(obj, cam, scene)
+    bbox_ndc = get_bbox(obj, cam, scene)
 
     x_min, y_min, x_max, y_max = bbox_ndc
 
@@ -276,34 +304,68 @@ def surface_point_at_bbox_center(obj, cam=None, scene=None, max_dist=1e6):
 
 
 
-def get_apple_center(apple_id):
-    obj_name = f'apple{apple_id}'
-    apple = bpy.data.objects[obj_name]
+def get_obj_surface_center(obj_name) -> Tuple[Vector, Vector]:
+    """
+    Get the surface point of a specific object in the scene.
+    Args:
+        obj_name (str): The name of the object.
+    Returns:
+        Tuple[Vector, Vector]: The world and cam coordinates of the surface point.
+    """
+    obj = bpy.data.objects[obj_name]
     cam = bpy.context.scene.camera
     
     # Loop through all objects in the scene
-    for obj in bpy.data.objects:
-        if obj.name == obj_name:
-            obj.hide_render = False  # Keep this apple visible
+    for obj2 in bpy.data.objects:
+        if obj2==obj:
+            obj.hide_render = False  # Keep this object visible
         else:
             obj.hide_render = True   # Hide everything else from rendering
-    res = surface_point_at_bbox_center(apple, cam)
+    res = surface_point_at_bbox_center(obj, cam)
     if res:
         pt_w, pt_cam = res
-        print("Surface centre in camera space:", pt_cam)
-        print("Surface centre in world space:", pt_w)
         
     else:
         print("Apple is occluded or outside max_dist.")
-    for obj in bpy.data.objects:
-        if 'test' in obj.name: continue
-        obj.hide_render = False  # make all objects visible in render again
-def get_apple_ground_truth(apple_id):
-    '''
-    '''
-    pass
+    for ob in bpy.data.objects:
+        if 'test' in obj.name: 
+            continue
+        ob.hide_render = False  # make all objects visible in render again
+    return pt_w, pt_cam
+def get_apple_ground_truth(apple_obj_name: str,
+                           scene=None,
+                           res_x=None,
+                           res_y=None) -> AppleSample:
+    """
+    Return pixel AABB and visible‑surface centre for a single apple,
+    both expressed in the camera coordinate system defined by depth_to_point_cloud.
+    """
+    scene = scene or bpy.context.scene
+    cam   = scene.camera
+    apple = bpy.data.objects[apple_obj_name]
+
+    # --- 1. 2‑D bounding box ----------------------------------
+    ndc_bbox = get_bbox(apple, cam, scene)
+    res_x = res_x or scene.render.resolution_x
+    res_y = res_y or scene.render.resolution_y
+    x0_pix, y0_pix = ndc_to_pixel((ndc_bbox[0], ndc_bbox[1]), res_x, res_y)
+    x1_pix, y1_pix = ndc_to_pixel((ndc_bbox[2], ndc_bbox[3]), res_x, res_y)
+    bbox_px = [int(x0_pix), int(y0_pix), int(x1_pix), int(y1_pix)]
+
+    # --- 2. 3‑D centre on the apple surface -------------------
+    loc_W, loc_cam = get_obj_surface_center(apple_obj_name)
+    print("WOrld loc:", loc_W)
+    # --- 3. Pack into the pydantic model ----------------------
+    sample = AppleSample(
+        apple_id=apple.name.split('apple')[1],
+        apple_name=apple.name,
+        apple_bbox=bbox_px,
+        apple_center=[loc_cam.x, -1*loc_cam.y, loc_cam.z],
+    )
+    return sample
+
 if __name__ == "__main__":
-    # get_apple_center(8)
+    print(get_apple_ground_truth('apple8'))
     # box_dict = get_visible_apple_boxes()
     # for k, v in box_dict.items():
     #     print(f"Object: {k}")
@@ -311,15 +373,6 @@ if __name__ == "__main__":
     #     print(f"  NDC BBox: {v[1]}")
     
     stem = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard"
-    
-#    for collection in ['foliage', 'stems'=, 'branches']:
-#        col = bpy.data.collections.get(collection)     # replace with your collection name
-#        if col:                                     # safety check
-#            col.hide_render  = True    # toggle camera icon
-#            print("Hiding ", collection)
-#        else:
-#            print("No collection", collection)
-
 
     depth_png, rgb_png, idx_png, id_mapping_json = save_rgbd(res_x=1280, res_y=720,
                                              path_stem=stem)
