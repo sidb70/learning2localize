@@ -1,0 +1,5 @@
+dataset/
+*.ply
+*.png
+*.npy
+*.blend
