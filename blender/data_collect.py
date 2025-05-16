@@ -6,6 +6,8 @@ from mathutils.bvhtree import BVHTree
 import json
 from pydantic import BaseModel, Field
 from typing import List, Tuple, Dict
+import pyexr
+from uuid import uuid4
 
 
 class AppleSample(BaseModel):
@@ -123,7 +125,6 @@ def save_rgbd(res_x=1280, res_y=720,
 
 
 def depth_to_point_cloud(depth_path,
-                         max_distance=1.8,
                          cam=None,
                          as_world=False):
     cam = cam or bpy.context.scene.camera
@@ -237,37 +238,8 @@ def ndc_center_of_bbox(obj, cam=None, scene=None):
     x_ndc = (x_min + x_max) * 0.5
     y_ndc = (y_min + y_max) * 0.5
     return x_ndc, y_ndc
-def is_visible(obj, cam=None, scene=None, margin=0.0):
-    """
-    Return True if the NDC bounding box of the object intersects the camera's view (0..1 in x and y),
-    optionally extended by a margin.
-    """
-    bbox_ndc = get_bbox(obj, cam, scene)
 
-    x_min, y_min, x_max, y_max = bbox_ndc
-
-    # Bounding box must overlap with screen space [0,1] (with margin)
-    in_x = (x_max >= 0.0 - margin) and (x_min <= 1.0 + margin)
-    in_y = (y_max >= 0.0 - margin) and (y_min <= 1.0 + margin)
-
-    return in_x and in_y
-def get_visible_apple_boxes(
-                       cam=None,
-                       scene=None,
-                       margin=0.0):
-    """
-    Returns {object_name: [camera-space bbox corners]} for
-    all visible mesh objects whose name contains *mask*.
-    """
-    scene = scene or bpy.context.scene
-    boxes = {}
-    for ob in scene.objects:
-        if (ob.type == 'MESH' and 'apple' in ob.name and 'stem' not in ob.name) \
-            and is_visible(ob, cam, scene, margin):
-                boxes[ob.name] = get_bbox(ob, cam, scene)
-    return boxes
-
-def surface_point_at_bbox_center(obj, cam=None, scene=None, max_dist=1e6):
+def surface_point_at_bbox_center(obj, cam=None, scene=None):
     scene = scene or bpy.context.scene
     cam   = cam   or scene.camera
     if cam.type != 'CAMERA':
@@ -293,7 +265,7 @@ def surface_point_at_bbox_center(obj, cam=None, scene=None, max_dist=1e6):
     origin_L = M_w2l @ origin_W
     dir_L    = (M_w2l.to_3x3() @ dir_W).normalized()
 
-    loc_L, no_L, face_i, dist = bvh.ray_cast(origin_L, dir_L, max_dist)
+    loc_L, no_L, face_i, dist = bvh.ray_cast(origin_L, dir_L)
     if loc_L is None:
         return None                                 # miss -> occluded or off‑fruit
 
@@ -311,6 +283,7 @@ def get_obj_surface_center(obj_name) -> Tuple[Vector, Vector]:
         obj_name (str): The name of the object.
     Returns:
         Tuple[Vector, Vector]: The world and cam coordinates of the surface point.
+        or None if the object is occluded or off-screen.
     """
     obj = bpy.data.objects[obj_name]
     cam = bpy.context.scene.camera
@@ -326,7 +299,7 @@ def get_obj_surface_center(obj_name) -> Tuple[Vector, Vector]:
         pt_w, pt_cam = res
         
     else:
-        print("Apple is occluded or outside max_dist.")
+        return # Apple is occluded or off-screen
     for ob in bpy.data.objects:
         if 'test' in obj.name: 
             continue
@@ -353,7 +326,10 @@ def get_apple_ground_truth(apple_obj_name: str,
     bbox_px = [int(x0_pix), int(y0_pix), int(x1_pix), int(y1_pix)]
 
     # --- 2. 3‑D centre on the apple surface -------------------
-    loc_W, loc_cam = get_obj_surface_center(apple_obj_name)
+    res= get_obj_surface_center(apple_obj_name)
+    if res is None:
+        return 
+    loc_W, loc_cam = res
     print("WOrld loc:", loc_W)
     # --- 3. Pack into the pydantic model ----------------------
     sample = AppleSample(
@@ -364,22 +340,72 @@ def get_apple_ground_truth(apple_obj_name: str,
     )
     return sample
 
-if __name__ == "__main__":
-    print(get_apple_ground_truth('apple8'))
-    # box_dict = get_visible_apple_boxes()
-    # for k, v in box_dict.items():
-    #     print(f"Object: {k}")
-    #     print(f"  World BBox corners: {v[0]}")
-    #     print(f"  NDC BBox: {v[1]}")
-    
-    stem = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard"
+def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callable = None):
+    '''Load the object IDs from the EXR file and map them to object names.
+    Args:
+        exr_path (str): Path to the EXR file containing object IDs.
+        id_mapping_path (str): Path to the JSON file mapping object IDs to names.
+        conditional (callable, optional): A function that takes an ID and name and returns True if the object should be included.
+    Returns:
+        list: A list of tuples containing the object ID and name for each visible object.
+    '''
+    with pyexr.open(exr_path) as exr_file:
+        # print(exr_file.channel_map)
+        object_id_channel = exr_file.get("V")  # Shape: (height, width, 1)
+        object_ids = object_id_channel[:, :, 0]  # Convert to 2D array
+
+    # Load the mapping from pass indices to object names
+    with open(id_mapping_path, "r") as f:
+        id_to_name = json.load(f)
+
+
+    # build apple instance mask
+    visible_ids = np.unique(object_ids).astype(int)
+    visible_ids = visible_ids[visible_ids != 0]
+    visible_objs = []
+    for id in visible_ids:
+        name = id_to_name.get(str(id), "Unknown")
+        if conditional is None or conditional(id, name):
+            visible_objs.append((id, name))
+    return visible_objs
+
+
+def collect_scene_data():
+    """
+    Collect data from the scene and saves it.
+    """
+
+
+    STEM = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard"
+    # print(get_apple_ground_truth('apple8'))
+    os.makedirs(STEM, exist_ok=True)
+    uid = str(uuid4())
+    STEM = os.path.join(STEM, uid)
 
     depth_png, rgb_png, idx_png, id_mapping_json = save_rgbd(res_x=1280, res_y=720,
-                                             path_stem=stem)
+                                             path_stem=STEM)
 
-    cloud = depth_to_point_cloud(depth_png, max_distance=1.8, as_world=False)
-    pc_path = stem + "_pc.npy"
+    cloud = depth_to_point_cloud(depth_png, as_world=False)
+    pc_path = STEM + "_pc.npy"
     np.save(pc_path, cloud)
     print("Saved point cloud to ", pc_path)
     print("cloud shape:", cloud.shape)
+
+    visible_apples = get_visible_objects(idx_png, id_mapping_json, 
+                                         conditional=lambda id, name: 'apple' in name and 'stem' not in name)
+    print("Visible apples:", visible_apples)
+
+    scene_apple_data = {}
+    for _, apple_name in visible_apples:
+        apple_sample = get_apple_ground_truth(apple_name)
+        if apple_sample is None:
+            print(f"Apple {apple_name} is occluded or off-screen.")
+            continue
+        scene_apple_data[apple_name] = apple_sample.model_dump_json()
+        print(apple_sample)
+    # Save the apple data to a JSON file
+    json_path = STEM + "_apple_data.json"
+    with open(json_path, "w") as f:
+        json.dump(scene_apple_data, f)
+    print("Saved apple data to ", json_path)
 
