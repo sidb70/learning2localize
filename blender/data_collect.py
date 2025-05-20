@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from typing import List, Tuple, Dict
 import pyexr
 from uuid import uuid4
+import utils
 
 
 class AppleSample(BaseModel):
@@ -340,58 +341,40 @@ def get_apple_ground_truth(apple_obj_name: str,
     )
     return sample
 
-def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callable = None):
-    '''Load the object IDs from the EXR file and map them to object names.
-    Args:
-        exr_path (str): Path to the EXR file containing object IDs.
-        id_mapping_path (str): Path to the JSON file mapping object IDs to names.
-        conditional (callable, optional): A function that takes an ID and name and returns True if the object should be included.
-    Returns:
-        list: A list of tuples containing the object ID and name for each visible object.
-    '''
-    with pyexr.open(exr_path) as exr_file:
-        # print(exr_file.channel_map)
-        object_id_channel = exr_file.get("V")  # Shape: (height, width, 1)
-        object_ids = object_id_channel[:, :, 0]  # Convert to 2D array
-
-    # Load the mapping from pass indices to object names
-    with open(id_mapping_path, "r") as f:
-        id_to_name = json.load(f)
 
 
-    # build apple instance mask
-    visible_ids = np.unique(object_ids).astype(int)
-    visible_ids = visible_ids[visible_ids != 0]
-    visible_objs = []
-    for id in visible_ids:
-        name = id_to_name.get(str(id), "Unknown")
-        if conditional is None or conditional(id, name):
-            visible_objs.append((id, name))
-    return visible_objs
+def save_camera_info(cam, stem):
+    # -------------------------------------------------------
+    # Save camera pose info
+    # -------------------------------------------------------
+    cam_info = {
+        "location": list(cam.location),
+        "rotation_euler": list(cam.rotation_euler),
+        "rotation_matrix": [list(row) for row in cam.matrix_world.to_3x3()],
+        "cam_to_world": [list(row) for row in cam.matrix_world],
+        "world_to_cam": [list(row) for row in cam.matrix_world.inverted()],
+    }
 
+    cam_json_path = stem + "_camera_info.json"
+    with open(cam_json_path, "w") as f:
+        json.dump(cam_info, f, indent=2)
+    print("Saved camera info to", cam_json_path)
 
-def collect_scene_data():
+def collect_scene_data(stem ):
     """
     Collect data from the scene and saves it.
     """
 
-
-    STEM = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard"
-    # print(get_apple_ground_truth('apple8'))
-    os.makedirs(STEM, exist_ok=True)
-    uid = str(uuid4())
-    STEM = os.path.join(STEM, uid)
-
     depth_png, rgb_png, idx_png, id_mapping_json = save_rgbd(res_x=1280, res_y=720,
-                                             path_stem=STEM)
+                                             path_stem=stem)
 
     cloud = depth_to_point_cloud(depth_png, as_world=False)
-    pc_path = STEM + "_pc.npy"
+    pc_path = stem + "_pc.npy"
     np.save(pc_path, cloud)
     print("Saved point cloud to ", pc_path)
     print("cloud shape:", cloud.shape)
 
-    visible_apples = get_visible_objects(idx_png, id_mapping_json, 
+    visible_apples, id_mask, inst_mask, id_to_name = utils.get_visible_objects(idx_png, id_mapping_json, 
                                          conditional=lambda id, name: 'apple' in name and 'stem' not in name)
     print("Visible apples:", visible_apples)
 
@@ -404,8 +387,36 @@ def collect_scene_data():
         scene_apple_data[apple_name] = apple_sample.model_dump_json()
         print(apple_sample)
     # Save the apple data to a JSON file
-    json_path = STEM + "_apple_data.json"
+    json_path = stem + "_apple_data.json"
     with open(json_path, "w") as f:
         json.dump(scene_apple_data, f)
     print("Saved apple data to ", json_path)
 
+
+def collection_loop(num_samples=10):
+    '''
+    Collect data from orchard. Randomly moves the sun and camera and collects data from the scene.
+
+    Args:
+        num_samples (int): Number of samples to collect.
+    '''
+
+    SAVE_DIR = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20"
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    scn = bpy.context.scene
+    for i in range(num_samples):
+
+        print(f"Sample {i+1}/{num_samples}")
+
+        uid = str(uuid4())
+        stem = os.path.join(SAVE_DIR, uid) 
+
+        ### Move the sun and camera to random positions
+        utils.move_sun_random()
+        rand_apple_pt = scn.objects.get(f"apple{np.random.randint(1, 200)}").location
+        utils.move_camera_random(target_point=rand_apple_pt)
+
+        ### Collect data from the scene
+        collect_scene_data(stem)
+        save_camera_info(scn.camera, stem)
