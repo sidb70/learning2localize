@@ -125,6 +125,112 @@ def clone_object_random(source_name: str,
 
     return new_obj
 
+def move_camera_random(min_xyz=Vector((-1.7732, -1.6281, 0.6314)),
+                      max_xyz=Vector((1.5449, 1.5844, 3.4049)),
+                      look_at_target=None,
+                      camera_name="Camera"):
+    # Move a camera to a random point within a bounding box defined by min_xyz and max_xyz
+    # coordinates, and aim it at a target apple object.
+    # Also randomizes the distance from the camera to the target within a range of 0.6 to 2 meters.
+    
+    # Parameters
+    # ----------
+    # min_xyz : Vector
+    #     Minimum XYZ coordinates defining the bounding box.
+    # max_xyz : Vector
+    #     Maximum XYZ coordinates defining the bounding box.
+    # look_at_target : Vector or str or bpy.types.Object
+    #     Target to point the camera at. Can be:
+    #     - Vector coordinates of an apple
+    #     - Name of an apple object in the scene
+    #     - The apple object itself
+    #     If None, the camera's rotation will remain unchanged.
+    # camera_name : str
+    #     Name of the camera object to move. If no camera of that name exists,
+    #     a new camera is created.
+    
+    # Returns
+    # -------
+    # bpy.types.Object
+    #     The camera that was moved and oriented.
+    
+    scn = bpy.context.scene
+    
+    # ---------------------------------------------------- 1 : get / create the Camera object
+    camera = scn.objects.get(camera_name)
+    if camera is None or camera.type != 'CAMERA':
+        if camera is not None:
+            raise ValueError(f"'{camera_name}' exists but is not a Camera.")
+        # Create a new camera in the world origin
+        camera_data = bpy.data.cameras.new(name=camera_name)
+        camera = bpy.data.objects.new(name=camera_name, object_data=camera_data)
+        scn.collection.objects.link(camera)
+        print(f"Created new camera named '{camera_name}'")
+    else:
+        print(f"Found existing camera named '{camera_name}'")
+    
+    # ---------------------------------------------------- 2 : sample a random position within bounding box
+    x = random.uniform(min_xyz.x, max_xyz.x)
+    y = random.uniform(min_xyz.y, max_xyz.y)
+    z = random.uniform(min_xyz.z, max_xyz.z)
+    camera.location = Vector((x, y, z))
+    
+    # ---------------------------------------------------- 3 : aim camera at the target if provided
+    if look_at_target is not None:
+        target_location = None
+        
+        # handle different types of target input
+        if isinstance(look_at_target, Vector):
+            # If a Vector is provided, use it directly
+            target_location = look_at_target
+        elif isinstance(look_at_target, str):
+            # If a string is provided, look for an object with that name
+            target_obj = scn.objects.get(look_at_target)
+            if target_obj is not None:
+                target_location = target_obj.location
+            else:
+                print(f"Warning: Target object '{look_at_target}' not found. Camera rotation unchanged.")
+        elif hasattr(look_at_target, "location"):
+            # If an object with a location attribute is provided (like a Blender object)
+            target_location = look_at_target.location
+        
+        if target_location is not None:
+            # Calculate direction from camera to target
+            look_dir = (target_location - camera.location).normalized()
+            
+            # -------------------------------------------- 4 : randomize distance from target (0.6 to 2 meters)
+            random_distance = random.uniform(0.6, 2.0)
+            # Adjust camera position to be at the random distance from target
+            camera.location = target_location - look_dir * random_distance
+            
+            # Recalculate direction after position change
+            look_dir = (target_location - camera.location).normalized()
+            
+            # Look down the -Z axis at the target, with Y up
+            rot_quat = look_dir.to_track_quat('-Z', 'Y')
+            camera.rotation_euler = rot_quat.to_euler()
+            print(f"Camera positioned at {camera.location}, and aimed at {target_location}")
+        else:
+            print(f"Camera positioned at {camera.location}, rotation unchanged")
+    else:
+        print(f"Camera positioned at {camera.location}, rotation unchanged")
+    
+    # Optional: Set as active camera
+    scn.camera = camera
+    
+    return camera
+
+"""
+Example usage:
+move_camera_random(look_at_target="Apple_M01") # Look at an apple by name
+or
+apple = bpy.data.objects.get("Apple_M01")
+move_camera_random(look_at_target=apple) # Look at an apple object
+or
+apple_location = Vector((0.5, 0.3, 1.2))
+move_camera_random(look_at_target=apple_location) # Look at apple coordinates
+"""
+
 if __name__ == "__main__":
     move_sun_random()
     
