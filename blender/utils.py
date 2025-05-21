@@ -1,5 +1,8 @@
 import bpy, random, math
 from mathutils import Vector, Euler
+import numpy as np
+import json
+import pyexr
 
 def move_sun_random(min_radius=10.0,
                     max_radius=20.0,
@@ -211,9 +214,9 @@ def move_camera_random(min_xyz=Vector((-1.7732, -1.6281, 0.6314)),
             camera.rotation_euler = rot_quat.to_euler()
             print(f"Camera positioned at {camera.location}, and aimed at {target_location}")
         else:
-            print(f"Camera positioned at {camera.location}, rotation unchanged")
+            raise ValueError("Target location could not be determined.")
     else:
-        print(f"Camera positioned at {camera.location}, rotation unchanged")
+        raise ValueError("No target provided for camera orientation.")
     
     # Optional: Set as active camera
     scn.camera = camera
@@ -230,6 +233,46 @@ or
 apple_location = Vector((0.5, 0.3, 1.2))
 move_camera_random(look_at_target=apple_location) # Look at apple coordinates
 """
+
+def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callable = None):
+    '''Load the object IDs from the EXR file and map them to object names.
+    Args:
+        exr_path (str): Path to the EXR file containing object IDs.
+        id_mapping_path (str): Path to the JSON file mapping object IDs to names.
+        conditional (callable, optional): A function that takes an ID and name and returns True if the object should be included.
+    Returns:
+        visible_objs (list): List of tuples containing object IDs and names.
+        id_mask (np.ndarray): The id mask from the EXR file
+        id_to_name (dict): Mapping from object IDs to names.
+    '''
+    with pyexr.open(exr_path) as exr_file:
+        # print(exr_file.channel_map)
+        object_id_channel = exr_file.get("V")  # Shape: (height, width, 1)
+        id_mask = object_id_channel[:, :, 0].astype(int)  # Convert to 2D array
+
+    # Load the mapping from pass indices to object names
+    with open(id_mapping_path, "r") as f:
+        id_to_name = json.load(f)
+
+    # build apple instance mask
+    visible_ids = np.unique(id_mask).astype(int)
+    visible_ids = visible_ids[visible_ids != 0]
+    visible_objs = []
+
+    instance_mask = np.zeros_like(id_mask)
+    unique_id = 1
+    for id in visible_ids:
+        name = id_to_name.get(str(id), "Unknown")
+        if conditional is None or conditional(id, name):
+            visible_objs.append((id, name))
+            instance_mask[id_mask == id] = unique_id
+            unique_id+=1
+    instance_mask = instance_mask.astype(np.uint8)
+
+    return visible_objs, id_mask, instance_mask, id_to_name
+
+    
+
 
 if __name__ == "__main__":
     move_sun_random()

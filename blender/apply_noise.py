@@ -249,18 +249,59 @@ def apply_noise(pc_im, rgb_im, instance_mask):
 
 
 if __name__ == "__main__":
+    import os
+    import shutil
     # Load data
-    pc_im = np.load('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_pc.npy')
-    rgb_im = cv2.imread('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_rgb0000.png')
-    rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
+    # pc_im = np.load('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_pc.npy')
+    # rgb_im = cv2.imread('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_rgb0000.png')
+    # rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
     
-    visible_objs, id_mask, instance_mask, id_to_name = utils.get_visible_objects(
-        exr_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id0000.exr',
-        id_mapping_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id_map.json'
-    )
+    # visible_objs, id_mask, instance_mask, id_to_name = utils.get_visible_objects(
+    #     exr_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id0000.exr',
+    #     id_mapping_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id_map.json'
+    # )
 
-    pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
+    # pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
 
-    pcd = pc_img_to_pcd(pc_im, rgb_im)
-    o3d.visualization.draw_geometries([pcd])
+    # pcd = pc_img_to_pcd(pc_im, rgb_im)
+    # o3d.visualization.draw_geometries([pcd])
+
+    ORIGINAL_DIR = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20'
+    NEW_DIR = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed'
+    os.makedirs(NEW_DIR, exist_ok=True)
+    all_raw_files = os.listdir(ORIGINAL_DIR)
+    sample_ids = set([f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')])
+    id_to_files = {
+        sample_id: [f for f in all_raw_files if f.startswith(sample_id)] for sample_id in sample_ids
+    }
+    new_dir_ids = set([f.split('_')[0] for f in os.listdir(NEW_DIR) if f.endswith('pc.npy')])
+    for sample_id in sample_ids:
+        sample_path = os.path.join(ORIGINAL_DIR, sample_id)
+        if sample_id in new_dir_ids:
+            print("Skipping ", sample_id)
+            continue 
+        pc_im = np.load(sample_path + "_pc.npy") 
+        rgb_im = cv2.imread(sample_path + "_rgb0000.png")
+        rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
+        visible_objs, id_mask, instance_mask, id_to_name = utils.get_visible_objects(
+            exr_path = sample_path + '_id0000.exr',
+            id_mapping_path = sample_path + '_id_map.json'
+        )
+        pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
+
+
+        new_path = os.path.join(NEW_DIR, sample_id)
+        np.save(new_path + '_pc.npy', pc_im)
+        rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(new_path + '_rgb0000.png', rgb_im)
+        for fname in id_to_files[sample_id]:
+            if 'pc' in fname or 'rgb' in fname:
+                continue
+            
+            src = os.path.join(ORIGINAL_DIR, fname)
+            dst = os.path.join(NEW_DIR, fname)
+            shutil.copy2(src, dst)
+        print("applied noise to ", sample_id)
+     
+
 
