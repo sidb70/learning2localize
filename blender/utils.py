@@ -220,16 +220,87 @@ def move_camera_random(min_xyz=Vector((-1.7732, -1.6281, 0.6314)),
     
     return camera
 
-"""
-Example usage:
-move_camera_random(look_at_target="Apple_M01") # Look at an apple by name
-or
-apple = bpy.data.objects.get("Apple_M01")
-move_camera_random(look_at_target=apple) # Look at an apple object
-or
-apple_location = Vector((0.5, 0.3, 1.2))
-move_camera_random(look_at_target=apple_location) # Look at apple coordinates
-"""
+    """
+    Example usage:
+    move_camera_random(look_at_target="Apple_M01") # Look at an apple by name
+    or
+    apple = bpy.data.objects.get("Apple_M01")
+    move_camera_random(look_at_target=apple) # Look at an apple object
+    or
+    apple_location = Vector((0.5, 0.3, 1.2))
+    move_camera_random(look_at_target=apple_location) # Look at apple coordinates
+    """
+
+def position_camera():
+    """
+    Position a camera randomly around an imaginary ellipse.
+    
+    The ellipse is centered at (0, 0, 2) with dimensions:
+    - x = 3
+    - y = 3
+    - z = 2.25
+    
+    The camera is positioned 0 to .5 meters away from the ellipse surface
+    and always points at the ellipse center.
+    """
+    # Get the camera object (or create one if it doesn't exist)
+    if 'Camera' in bpy.data.objects:
+        camera = bpy.data.objects['Camera']
+    else:
+        camera_data = bpy.data.cameras.new(name='Camera')
+        camera = bpy.data.objects.new('Camera', camera_data)
+        bpy.context.collection.objects.link(camera)
+    
+    # Ellipse properties
+    ellipse_center = Vector((0, 0, 2))
+    ellipse_dimensions = Vector((3, 3, 2.25))
+    
+    # Generate a random point on a unit sphere
+    theta = random.uniform(0, 2 * math.pi)
+    phi = random.uniform(0, math.pi)
+    
+    x = math.sin(phi) * math.cos(theta)
+    y = math.sin(phi) * math.sin(theta)
+    z = math.cos(phi)
+    
+    # Convert the unit sphere point to ellipsoid surface
+    point_on_ellipsoid = Vector((
+        x * ellipse_dimensions.x,
+        y * ellipse_dimensions.y,
+        z * ellipse_dimensions.z
+    ))
+    
+    # Calculate the distance from the center to this point on the ellipsoid
+    ellipsoid_radius_in_this_direction = point_on_ellipsoid.length
+    
+    # Normalize the direction vector
+    direction = point_on_ellipsoid.normalized()
+    
+    # Calculate a random distance from the ellipsoid (0 to .5 meters)
+    distance_from_ellipsoid = random.uniform(0, .5)
+    
+    # Calculate the total distance from the center
+    total_distance = ellipsoid_radius_in_this_direction + distance_from_ellipsoid
+    
+    # Calculate the final camera position
+    camera_position = ellipse_center + direction * total_distance
+    
+    # Set camera position
+    camera.location = camera_position
+    
+    # Point the camera at the ellipse center
+    direction_to_center = ellipse_center - camera_position
+    
+    # Convert the direction to rotation (point the camera at the ellipse center)
+    # The camera's -Z axis should point toward the target, and the Y axis should be up
+    rot_quat = direction_to_center.to_track_quat('-Z', 'Y')
+    camera.rotation_euler = rot_quat.to_euler()
+    
+    # Update the scene
+    bpy.context.view_layer.update()
+    
+    return camera
+
 
 if __name__ == "__main__":
     move_sun_random()
