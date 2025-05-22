@@ -414,8 +414,9 @@ def collection_loop(num_samples=10):
 
         ### Move the sun and camera to random positions
         utils.move_sun_random()
-        rand_apple_name = f"apple{np.random.randint(1, 200)}"
-        utils.move_camera_random(look_at_target=rand_apple_name)
+        # rand_apple_name = f"apple{np.random.randint(1, 200)}"
+        # utils.move_camera_random(look_at_target=rand_apple_name)
+        utils.position_camera()
 
         ### Collect data from the scene
         collect_scene_data(stem)
