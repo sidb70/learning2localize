@@ -159,8 +159,14 @@ def add_flying_pixels(pc_im, instance_mask, shared_contours, displacement_std=0.
                 noise[neighborhood > obj1_mean_depth] = 0
                 normal_noise[bigger_neighborhood > obj1_mean_depth] = 0
             
-            pc_img[pt_idx[0]-2:pt_idx[0]+3, pt_idx[1]-2:pt_idx[1]+3, 2] += noise
-            pc_img[pt_idx[0]-5:pt_idx[0]+6, pt_idx[1]-5:pt_idx[1]+6, 2] += normal_noise
+            new_depths_1 = pc_img[pt_idx[0]-2:pt_idx[0]+3, pt_idx[1]-2:pt_idx[1]+3,2]+ noise
+            # project each point to the new depth
+            pc_img[pt_idx[0]-2:pt_idx[0]+3, pt_idx[1]-2:pt_idx[1]+3,:2]*= (new_depths_1 / pc_img[pt_idx[0]-2:pt_idx[0]+3, pt_idx[1]-2:pt_idx[1]+3,2])[:, :, np.newaxis]
+            new_depths_2 = pc_img[pt_idx[0]-5:pt_idx[0]+6, pt_idx[1]-5:pt_idx[1]+6,2]+ normal_noise
+            # project each point to the new depth
+            pc_img[pt_idx[0]-5:pt_idx[0]+6, pt_idx[1]-5:pt_idx[1]+6,:2]*= (new_depths_2 / pc_img[pt_idx[0]-5:pt_idx[0]+6, pt_idx[1]-5:pt_idx[1]+6,2])[:, :, np.newaxis]
+            pc_img[pt_idx[0]-2:pt_idx[0]+3, pt_idx[1]-2:pt_idx[1]+3,2]+= noise
+            pc_img[pt_idx[0]-5:pt_idx[0]+6, pt_idx[1]-5:pt_idx[1]+6,2]+= normal_noise
     return pc_img
 
 def blur_img_edges(rgb_im, shared_contours, blur_radius=2):
@@ -219,6 +225,9 @@ def add_distance_based_noise(pc_im, base_noise=0.0004, meter_noise_percent=0.002
     # add noise based on z val. higher z val, more noise
     ## ±4 mm + 0.25% of depth
     noise = np.random.normal(0, base_noise + meter_noise_percent * -1*pc_img[:, :, 2], pc_img[:,:,2].shape)
+    new_depths = pc_img[:, :, 2] + noise
+    # project each point to the new depth
+    pc_img[:, :, :2] *= (new_depths / pc_img[:, :, 2])[:, :, np.newaxis]
     pc_img[:, :, 2] += noise
     return pc_img
 
