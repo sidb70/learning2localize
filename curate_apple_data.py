@@ -12,7 +12,7 @@ Each line has:
 {
   "stem": "UUID-like-name",
   "boxes":   [[x1,y1,x2,y2], ...],      # int
-  "centres": [[x,y,z], ...]             # float, camera space (Y restored!)
+  "centers": [[x,y,z], ...]             # float, camera space (Y restored!)
 }
 """
 
@@ -37,8 +37,6 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
     data_js  = os.path.join(raw_dir, f"{stem}_apple_data.json")
 
     num_samples=0
-    if stem in ['93d24ef0-1f6f-4679-827a-66189e58343d', '4c09cd09-acff-49b1-8984-0c130652012f']:
-        x=3
 
     # -------------------- load json for every apple -----------------------
     with open(data_js) as jf:
@@ -52,7 +50,7 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
     )
     px_counts = {name: (id_mask == _id).sum() for _id, name in vis}
 
-    boxes, centres, occ_rates = [], [], []
+    boxes, centers, occ_rates = [], [], []
     for item in apple_meta.values():
         num_samples += 1
         x1_raw, y1_raw, x2_raw, y2_raw = map(int, item["apple_bbox"])
@@ -70,7 +68,7 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
 
         # ----------- FIX Y-sign that was stored as -loc_cam.y -------------
         cx, cy, cz = item["apple_center"]
-        centres.append([cx, -cy, cz])
+        centers.append([cx, -cy, cz])
         boxes.append([x1, y1, x2, y2])  
         occ_rates.append(px_ratio)
 
@@ -85,7 +83,7 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
     total_samples += num_samples
     total_kept_samples += final_kept_samples
 
-    return {"stem": stem, "boxes": boxes, "centres": centres, "occ_rates": occ_rates}
+    return {"stem": stem, "boxes": boxes, "centers": centers, "occ_rates": occ_rates}
 
 def build_manifest(raw_dir: str, out_dir: str) -> str:
     """Run curation and write manifest.jsonl → returns its path."""
@@ -142,7 +140,7 @@ def split_manifest(manifest_path: str,
 
     for scene_idx, scene in enumerate(scenes):
         boxes   = scene["boxes"]
-        centres = scene["centres"]
+        centers = scene["centers"]
         occ_rates = scene["occ_rates"]
 
         train_bxs, train_ctrs, train_occ_rates = [], [], []
@@ -151,25 +149,25 @@ def split_manifest(manifest_path: str,
         for j in range(len(boxes)):
             if (scene_idx, j) in train_apples:
                 train_bxs.append(boxes[j])
-                train_ctrs.append(centres[j])
+                train_ctrs.append(centers[j])
                 train_occ_rates.append(occ_rates[j])
             elif (scene_idx, j) in test_apples:
                 test_bxs.append(boxes[j])
-                test_ctrs.append(centres[j])
+                test_ctrs.append(centers[j])
                 test_occ_rates.append(occ_rates[j])
 
         if train_bxs:
             train_scenes.append({
                 "stem": scene["stem"],
                 "boxes": train_bxs,
-                "centres": train_ctrs,
+                "centers": train_ctrs,
                 "occ_rates": train_occ_rates
             })
         if test_bxs:
             test_scenes.append({
                 "stem": scene["stem"],
                 "boxes": test_bxs,
-                "centres": test_ctrs,
+                "centers": test_ctrs,
                 "occ_rates": test_occ_rates
             })
 
@@ -208,6 +206,6 @@ if __name__ == "__main__":
                    default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed',
                    help="folder that contains *_pc.npy, *_rgb0000.png ...")
     p.add_argument("--out_dir", required=False,
-                   default='/home/siddhartha/RIVAL/learning2localize/blender/curated/apple-orchard-v1-with-occrates',
+                   default='/home/siddhartha/RIVAL/learning2localize/blender/curated/apple-orchard-v1',
                    help="destination for manifest.jsonl")
     main(**vars(p.parse_args()))
