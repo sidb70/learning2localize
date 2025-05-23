@@ -167,7 +167,7 @@ class ApplePointCloudDataset(Dataset):
 
         for scene_i, scene in enumerate(scenes):
             stem = scene["stem"]
-            for apple_i, (bbox, center, occ_rate) in enumerate(zip(scene["boxes"], scene["centres"], scene["occ_rates"])):
+            for apple_i, (bbox, center, occ_rate) in enumerate(zip(scene["boxes"], scene["centers"], scene["occ_rates"])):
                 center[1] = -center[1]  # flip y-axis to match the point cloud
                 self.records.append({
                     "stem": stem,
@@ -243,33 +243,33 @@ if __name__ == "__main__":
     val_dl   = DataLoader(val_ds,   batch_size=1, shuffle=True)
     test_dl  = DataLoader(test_ds,  batch_size=1, shuffle=True)
     # ------------------------------------------------------------------
-    for scene_i, (clouds_batch, centres_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(train_dl):
+    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(train_dl):
         pc  = clouds_batch[0]     # list[(N_i,6), …]
         assert pc.shape[1] == 6, f"Expected 6 channels, got {pc.shape[1]}"
-        centre  = centres_batch[0].numpy()  # (M,3)
+        center  = centers_batch[0].numpy()  # (M,3)
 
-        # fig = go.Figure()
-        # fig.add_trace(go.Scatter3d(
-        #     x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
-        #     mode="markers",
-        #     marker=dict(size=2,
-        #                 color=pc[:, 3:6] / 255.0,   # RGB -> [0,1]
-        #                 opacity=0.6)))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter3d(
+            x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
+            mode="markers",
+            marker=dict(size=2,
+                        color=pc[:, 3:6] / 255.0,   # RGB -> [0,1]
+                        opacity=0.6)))
 
-        # fig.add_trace(go.Scatter3d(
-        #     x=[centre[0]], y=[centre[1]], z=[centre[2]],
-        #     mode="markers",
-        #     marker=dict(size=8, color="red")))
+        fig.add_trace(go.Scatter3d(
+            x=[center[0]], y=[center[1]], z=[center[2]],
+            mode="markers",
+            marker=dict(size=8, color="red")))
 
-        # fig.update_layout(scene_aspectmode="data",
-        #                 width=700, height=700,
-        #                 margin=dict(l=0, r=0, b=0, t=0))
-        # fig.show()
+        fig.update_layout(scene_aspectmode="data",
+                        width=700, height=700,
+                        margin=dict(l=0, r=0, b=0, t=0))
+        fig.show()
 
-        # if scene_i >= 2:        # stop after 2 scenes
-        #     break
-    for scene_i, (clouds_batch, centres_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(val_dl):
+        if scene_i >= 2:        # stop after 2 scenes
+            break
+    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(val_dl):
         pass 
-    for scene_i, (clouds_batch, centres_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(test_dl):
+    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(test_dl):
         pass
     print("Dataloading worked")
