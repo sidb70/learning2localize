@@ -5,8 +5,19 @@ import matplotlib.pyplot as plt
 import cv2
 import open3d as o3d
 import json
+# import utils
+import multiprocessing as mp
+from functools import partial
+import shutil
+from pathlib import Path
+from tqdm import tqdm        
+import os
+import argparse       
 
-import utils
+# -------------------- PATHS --------------------
+ORIGINAL_DIR = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20')
+NEW_DIR      = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed')
+NEW_DIR.mkdir(exist_ok=True)
 
 
 def pc_img_to_pcd(pc_img, color_img=None):
@@ -257,60 +268,124 @@ def apply_noise(pc_im, rgb_im, instance_mask):
     return pc_im, rgb_im
 
 
-if __name__ == "__main__":
-    import os
-    import shutil
-    # Load data
-    # pc_im = np.load('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_pc.npy')
-    # rgb_im = cv2.imread('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_rgb0000.png')
-    # rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
-    
-    # visible_objs, id_mask, instance_mask, id_to_name = utils.get_visible_objects(
-    #     exr_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id0000.exr',
-    #     id_mapping_path = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard/c2083317-49fc-4530-9a23-447f6ca19da1_id_map.json'
-    # )
 
-    # pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
+def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callable = None):
+    '''Load the object IDs from the EXR file and map them to object names.
+    Args:
+        exr_path (str): Path to the EXR file containing object IDs.
+        id_mapping_path (str): Path to the JSON file mapping object IDs to names.
+        conditional (callable, optional): A function that takes an ID and name and returns True if the object should be included.
+    Returns:
+        visible_objs (list): List of tuples containing object IDs and names.
+        id_mask (np.ndarray): The id mask from the EXR file
+        id_to_name (dict): Mapping from object IDs to names.
+    '''
+    with pyexr.open(exr_path) as exr_file:
+        # print(exr_file.channel_map)
+        object_id_channel = exr_file.get("V")  # Shape: (height, width, 1)
+        id_mask = object_id_channel[:, :, 0].astype(int)  # Convert to 2D array
 
-    # pcd = pc_img_to_pcd(pc_im, rgb_im)
-    # o3d.visualization.draw_geometries([pcd])
+    # Load the mapping from pass indices to object names
+    with open(id_mapping_path, "r") as f:
+        id_to_name = json.load(f)
 
-    ORIGINAL_DIR = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20'
-    NEW_DIR = '/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed'
-    os.makedirs(NEW_DIR, exist_ok=True)
-    all_raw_files = os.listdir(ORIGINAL_DIR)
-    sample_ids = set([f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')])
-    id_to_files = {
-        sample_id: [f for f in all_raw_files if f.startswith(sample_id)] for sample_id in sample_ids
-    }
-    new_dir_ids = set([f.split('_')[0] for f in os.listdir(NEW_DIR) if f.endswith('pc.npy')])
-    for sample_id in sample_ids:
-        sample_path = os.path.join(ORIGINAL_DIR, sample_id)
-        if sample_id in new_dir_ids:
-            print("Skipping ", sample_id)
-            continue 
-        pc_im = np.load(sample_path + "_pc.npy") 
-        rgb_im = cv2.imread(sample_path + "_rgb0000.png")
+    # build apple instance mask
+    visible_ids = np.unique(id_mask).astype(int)
+    visible_ids = visible_ids[visible_ids != 0]
+    visible_objs = []
+
+    instance_mask = np.zeros_like(id_mask)
+    unique_id = 1
+    for id in visible_ids:
+        name = id_to_name.get(str(id), "Unknown")
+        if conditional is None or conditional(id, name):
+            visible_objs.append((id, name))
+            instance_mask[id_mask == id] = unique_id
+            unique_id+=1
+    instance_mask = instance_mask.astype(np.uint8)
+
+    return visible_objs, id_mask, instance_mask, id_to_name
+def process_sample(sample_id: str,
+                   voxel_size: float,
+                   overwrite: bool = False):
+    """
+    Full end-to-end pipeline for one sample-ID.
+    Runs safely in a separate process.
+    """
+    try:
+        # ---------- skip if already done ----------
+        if not overwrite and (NEW_DIR / f'{sample_id}_pc.npy').exists():
+            return f'skip:{sample_id}'
+
+        sample_path = ORIGINAL_DIR / sample_id
+
+        # ---------- load ----------
+        pc_im  = np.load(str(sample_path) + "_pc.npy")
+        rgb_im = cv2.imread(str(sample_path) + "_rgb0000.png")
         rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
-        visible_objs, id_mask, instance_mask, id_to_name = utils.get_visible_objects(
-            exr_path = sample_path + '_id0000.exr',
-            id_mapping_path = sample_path + '_id_map.json'
+
+        visible_objs, id_mask, instance_mask, id_to_name = get_visible_objects(
+            exr_path        = str(sample_path) + '_id0000.exr',
+            id_mapping_path = str(sample_path) + '_id_map.json'
         )
+
+        # ---------- noise ----------
         pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
 
 
-        new_path = os.path.join(NEW_DIR, sample_id)
-        np.save(new_path + '_pc.npy', pc_im)
-        rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(new_path + '_rgb0000.png', rgb_im)
-        for fname in id_to_files[sample_id]:
-            if 'pc' in fname or 'rgb' in fname:
+        # ---------- save ----------
+        new_path = NEW_DIR / sample_id
+        np.save(str(new_path) + '_pc.npy', pc_im)
+        rgb_bgr = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(new_path) + '_rgb0000.png', rgb_bgr)
+
+        # copy auxiliary files (everything except pc/rgb)
+        for fname in (f for f in os.listdir(ORIGINAL_DIR) if f.startswith(sample_id)):
+            if any(k in fname for k in ('_pc.npy', '_rgb')):
                 continue
-            
-            src = os.path.join(ORIGINAL_DIR, fname)
-            dst = os.path.join(NEW_DIR, fname)
-            shutil.copy2(src, dst)
-        print("applied noise to ", sample_id)
-     
+            shutil.copy2(ORIGINAL_DIR / fname, NEW_DIR / fname)
 
+        return f'done:{sample_id}'
 
+    except Exception as e:
+        return f'err :{sample_id}:{e}'
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Apply synthetic sensor noise and voxel normalisation to orchard dataset.'
+    )
+    parser.add_argument('--workers', type=int, default=mp.cpu_count(),
+                        help='Number of parallel workers (1 = sequential, <=0 threads instead of processes).')
+    parser.add_argument('--voxel', type=float, default=0.05,
+                        help='Voxel size for voxel_normalize.')
+    parser.add_argument('--overwrite', action='store_true',  default=False,
+                        help='Re-process samples even if output already exists.')
+    args = parser.parse_args()
+
+    # collect sample‑ids
+    all_raw_files = os.listdir(ORIGINAL_DIR)
+    sample_ids = {f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')}
+
+    # pick executor
+    if args.workers <= 0:
+        from concurrent.futures import ThreadPoolExecutor as Executor
+        max_workers = max(1, abs(args.workers))
+    else:
+        from concurrent.futures import ProcessPoolExecutor as Executor
+        max_workers = args.workers
+
+    worker_fn = partial(process_sample,
+                        voxel_size=args.voxel,
+                        overwrite=args.overwrite)
+
+    print(f"Processing {len(sample_ids)} samples with {max_workers} worker(s)…")
+    with Executor(max_workers=max_workers, mp_context=mp.get_context('spawn')) as ex:
+        for result in tqdm(ex.map(worker_fn, sample_ids), total=len(sample_ids)):
+            status, *info = result.split(':')
+            if status == 'err ':
+                print('⚠️ ', ':'.join(info))
+            elif status == 'skip':
+                print('⏭️ ', ':'.join(info))
+            elif status == 'done':
+                print('✅ ', ':'.join(info))
+
+    print('✅  All tasks complete.')
