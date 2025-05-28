@@ -203,9 +203,9 @@ def main(raw_dir: str, out_dir: str):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--raw_dir", required=False,
-                   default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed',
+                   default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-processed',
                    help="folder that contains *_pc.npy, *_rgb0000.png ...")
     p.add_argument("--out_dir", required=False,
-                   default='/home/siddhartha/RIVAL/learning2localize/blender/curated/apple-orchard-v1',
+                   default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-noaug',
                    help="destination for manifest.jsonl")
     main(**vars(p.parse_args()))

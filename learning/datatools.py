@@ -5,14 +5,13 @@ from torch.utils.data import DataLoader
 import numpy as np
 import os
 import json
-import random
-import pyexr
 import cv2
-import sys 
-sys.path.append("/home/siddhartha/RIVAL/learning2localize/blender/")
-import utils
-
-
+import torch
+import pytorch_lightning as pl
+from typing import Optional, Dict, Any
+from torch.utils.data import random_split
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 def augment_bounding_box(bounding_box: np.ndarray, 
                          x_extend_prop_range=(-.1, .1), 
@@ -155,12 +154,117 @@ def random_dropout(point_cloud: np.ndarray, dropout_range=(0.6, 0.8)):
 
     return dropped_point_cloud
 
+def voxel_normalize(points, voxel_size=0.005, percentile=95):
+    """Normalize using voxel grid to handle irregular density.
+    NaNs are preserved and ignored in normalization."""
+    
+    # Create voxel grid with valid (non-NaN) points only
+    voxel_grid = {}
+    for i, point in enumerate(points):
+        if np.any(np.isnan(point)):
+            continue  # skip NaNs in voxel computation
+        voxel_idx = tuple(np.floor(point / voxel_size).astype(int))
+        if voxel_idx not in voxel_grid:
+            voxel_grid[voxel_idx] = []
+        voxel_grid[voxel_idx].append(i)
+
+    # Compute voxel centers from valid points
+    voxel_centers = []
+    for point_indices in voxel_grid.values():
+        voxel_points = points[point_indices]
+        voxel_centers.append(np.mean(voxel_points, axis=0))
+
+    voxel_centers = np.array(voxel_centers)
+    
+    # Center and scale using voxel centers 
+    center = np.median(voxel_centers, axis=0)
+    distances = np.linalg.norm(voxel_centers - center, axis=1)
+    scale = np.percentile(distances, percentile)
+
+    # Normalize all points 
+    centered_points = points - center
+    scaled_points = centered_points / scale
+
+    return scaled_points, center, scale
+
+
+TARGET_PTS = 4096                      # fixed length for every cloud
+def pad_collate_fn(batch):
+    """
+    Collate variable-length point clouds to (B, 4096, D).
+
+    Returns
+    -------
+    batch_clouds : FloatTensor  (B, 4096, D)
+    batch_centers: FloatTensor  (B, 3)
+    batch_mask   : BoolTensor   (B, 4096)   1 = valid point, 0 = padding
+    batch_aux    : dict         other stacked / listed fields
+    """
+    clouds, centers, aux_list = zip(*batch)
+
+    # -------- convert to tensors -------------------------------------------------
+    tensor_clouds = []
+    for cloud in clouds:
+        if isinstance(cloud, np.ndarray):
+            cloud = torch.from_numpy(cloud).float()
+        elif not torch.is_tensor(cloud):
+            raise TypeError(f"Unsupported cloud type {type(cloud)}")
+        tensor_clouds.append(cloud)                         # (Ni, D)
+
+    # -------- pad / truncate -----------------------------------------------------
+    fixed, masks = [], []
+    for pc in tensor_clouds:
+        n, d = pc.shape
+
+        if n > TARGET_PTS:                                  # subsample
+            idx  = torch.randperm(n, device=pc.device)[:TARGET_PTS]
+            pc_f = pc[idx]
+            mask = torch.ones(TARGET_PTS, dtype=torch.bool, device=pc.device)
+
+        elif n < TARGET_PTS:                                # pad
+            pad_len = TARGET_PTS - n
+            pad     = torch.zeros((pad_len, d), dtype=pc.dtype, device=pc.device)
+            pc_f    = torch.cat([pc, pad], dim=0)
+            mask    = torch.cat([torch.ones(n, dtype=torch.bool, device=pc.device),
+                                 torch.zeros(pad_len, dtype=torch.bool, device=pc.device)])
+        else:                                               # already 4096
+            pc_f = pc
+            mask = torch.ones(TARGET_PTS, dtype=torch.bool, device=pc.device)
+
+        fixed.append(pc_f)
+        masks.append(mask)
+
+    batch_clouds = torch.stack(fixed)           # (B, 4096, D)
+    batch_mask   = torch.stack(masks)           # (B, 4096)
+
+    # -------- centers ------------------------------------------------------------
+    batch_centers = torch.stack([
+        torch.as_tensor(c, dtype=torch.float32)
+        if isinstance(c, np.ndarray) else c.float()
+        for c in centers
+    ])                                         # (B, 3)
+
+    # -------- auxiliary fields ---------------------------------------------------
+    batch_aux = {}
+    for k in aux_list[0]:
+        items = [aux[k] for aux in aux_list]
+
+        if torch.is_tensor(items[0]):
+            batch_aux[k] = torch.stack(items)
+        elif isinstance(items[0], (np.number, float, int)):
+            batch_aux[k] = torch.tensor(items, dtype=torch.float32)
+        else:
+            batch_aux[k] = items
+
+    return batch_clouds, batch_centers, batch_mask, batch_aux
 
 class ApplePointCloudDataset(Dataset):
-    def __init__(self, data_root: str, manifest_path: str, augment=True):
+    def __init__(self, data_root: str, manifest_path: str, config: dict, augment=True):
         self.root = data_root
         self.augment = augment
         self.records = []
+        self.voxel_size = config.get("voxel_size", 0.003)  # default voxel size for normalization
+        self.percentile = config.get("percentile", 95)    # default percentile for normalization
 
         with open(manifest_path) as f:
             scenes = [json.loads(line) for line in f]
@@ -183,10 +287,17 @@ class ApplePointCloudDataset(Dataset):
         r = self.records[idx]
         stem, bbox, center, occ_rate = r["stem"], r["bbox"], r["center"], r["occ_rate"]
 
-        xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
-        rgb = cv2.cvtColor(cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")), cv2.COLOR_BGR2RGB)
+        try:
+            with np.load(os.path.join(self.root, 'zipped',f"{stem}.npz")) as data:
+                xyz, rgb = data["xyz"], data["rgb"]
+        except Exception as e: ## catches filenotfound and corrupted file
+            xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
+            rgb = cv2.cvtColor(cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")), cv2.COLOR_BGR2RGB)
+            os.makedirs(os.path.join(self.root, 'zipped'), exist_ok=True)
+            np.savez_compressed(os.path.join(self.root, 'zipped',f"{stem}.npz"), xyz=xyz, rgb=rgb)
         xyzrgb = np.concatenate((xyz, rgb), axis=2)
-
+        if self.augment:
+            bbox = augment_bounding_box(bbox, x_extend_prop_range=(-.1, .1), y_extend_prop_range=(-.1, .1))
         x1, y1, x2, y2 = map(int, bbox)
         crop = xyzrgb[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
 
@@ -197,17 +308,102 @@ class ApplePointCloudDataset(Dataset):
             crop[:, :, 3:] = augment_rgb(crop[:, :, 3:])
  
         pc = crop.reshape(-1, 6)
+        # set rows with z < .5 or z > 2.5 to NaN
+        pc = pc[~((np.abs(pc[:, 2]) < 0.45) | (np.abs(pc[:, 2]) > 2.75))]
+
+        # remove rows with NaN or Inf values
         pc = pc[~np.isnan(pc).any(1)]
         pc = pc[~np.isinf(pc).any(1)]
         assert pc.shape[0] > 0, f"Empty point cloud for {stem} at index {idx}"
-        if self.augment:
-            pc = random_dropout(pc, dropout_range=(0.6, 0.8))
-            # pc, rotation_matrix = rotate_point_cloud(pc)
-        #     center = np.dot(rotation_matrix, center)
-        #     print("Old center", r["center"])
-        #     print("Rotated center", center)
 
-        return pc, np.array(center, dtype=np.float32), {'stem': stem, 'bbox': bbox, 'occ_rate': occ_rate}
+        if self.augment:
+            pc = random_dropout(pc, dropout_range=(0.3, 0.7))
+        norm_pc_3d, norm_ctr, norm_scale = voxel_normalize(pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        pc[:, :3] = norm_pc_3d
+        ## ## normalize center 
+        center = ((torch.tensor(center) - norm_ctr) / norm_scale).float()
+
+        return pc, center, {'stem': stem, 'bbox': bbox, 'occ_rate': occ_rate, 'norm_scale': norm_scale, 'norm_center': norm_ctr}
+
+
+
+class AppleDataModule(pl.LightningDataModule):
+    """Wrap the ApplePointCloudDataset into a LightningDataModule."""
+
+    def __init__(
+        self,
+        data_root: str,
+        train_manifest: str,
+        test_manifest: str,
+        batch_size: int = 32,
+        num_workers: int = 12,
+        val_split: float = 0.2,
+        augment: bool = True,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.data_root = data_root
+        self.train_manifest = train_manifest
+        self.test_manifest = test_manifest
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.val_split = val_split
+        self.augment = augment
+
+        self.train_ds = None
+        self.val_ds = None
+        self.test_ds = None
+
+    # ---------------------------------------------------------------------
+    def setup(self, stage: Optional[str] = None):
+        if stage == "fit" or stage is None:
+            full = ApplePointCloudDataset(
+                data_root=self.data_root,
+                manifest_path=self.train_manifest,
+                augment=self.augment,
+            )
+            val_len = int(len(full) * self.val_split)
+            train_len = len(full) - val_len
+            self.train_ds, self.val_ds = random_split(full, [train_len, val_len])
+
+        if stage == "test" or stage is None:
+            self.test_ds = ApplePointCloudDataset(
+                data_root=self.data_root,
+                manifest_path=self.test_manifest,
+                augment=False,
+            )
+
+    # ---------------------------------------------------------------------
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=pad_collate_fn,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=pad_collate_fn,
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=pad_collate_fn,
+        )
 
 
 if __name__ == "__main__":
@@ -239,35 +435,35 @@ if __name__ == "__main__":
     print("val size", len(val_ds))
     print("test size", len(test_ds))
 
-    train_dl = DataLoader(train_ds, batch_size=1, shuffle=True)    
-    val_dl   = DataLoader(val_ds,   batch_size=1, shuffle=True)
-    test_dl  = DataLoader(test_ds,  batch_size=1, shuffle=True)
+    train_dl = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=12, collate_fn=pad_collate_fn)
+    val_dl   = DataLoader(val_ds,   batch_size=1, shuffle=True, num_workers=12)
+    test_dl  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=12)
     # ------------------------------------------------------------------
-    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(train_dl):
+    for scene_i, (clouds_batch, centers_batch, aux) in enumerate(train_dl):
         pc  = clouds_batch[0]     # list[(N_i,6), …]
         assert pc.shape[1] == 6, f"Expected 6 channels, got {pc.shape[1]}"
         center  = centers_batch[0].numpy()  # (M,3)
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter3d(
-            x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
-            mode="markers",
-            marker=dict(size=2,
-                        color=pc[:, 3:6] / 255.0,   # RGB -> [0,1]
-                        opacity=0.6)))
+        # fig = go.Figure()
+        # fig.add_trace(go.Scatter3d(
+        #     x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
+        #     mode="markers",
+        #     marker=dict(size=2,
+        #                 color=pc[:, 3:6] / 255.0,   # RGB -> [0,1]
+        #                 opacity=0.6)))
 
-        fig.add_trace(go.Scatter3d(
-            x=[center[0]], y=[center[1]], z=[center[2]],
-            mode="markers",
-            marker=dict(size=8, color="red")))
+        # fig.add_trace(go.Scatter3d(
+        #     x=[center[0]], y=[center[1]], z=[center[2]],
+        #     mode="markers",
+        #     marker=dict(size=8, color="red")))
 
-        fig.update_layout(scene_aspectmode="data",
-                        width=700, height=700,
-                        margin=dict(l=0, r=0, b=0, t=0))
-        fig.show()
+        # fig.update_layout(scene_aspectmode="data",
+        #                 width=700, height=700,
+        #                 margin=dict(l=0, r=0, b=0, t=0))
+        # fig.show()
 
-        if scene_i >= 2:        # stop after 2 scenes
-            break
+        # if scene_i >= 2:        # stop after 2 scenes
+        #     break
     for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(val_dl):
         pass 
     for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(test_dl):

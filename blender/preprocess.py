@@ -15,8 +15,8 @@ import os
 import argparse       
 
 # -------------------- PATHS --------------------
-ORIGINAL_DIR = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20')
-NEW_DIR      = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed')
+ORIGINAL_DIR = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20')
+NEW_DIR      = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-no-flying')
 NEW_DIR.mkdir(exist_ok=True)
 
 
@@ -306,7 +306,6 @@ def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callab
 
     return visible_objs, id_mask, instance_mask, id_to_name
 def process_sample(sample_id: str,
-                   voxel_size: float,
                    overwrite: bool = False):
     """
     Full end-to-end pipeline for one sample-ID.
@@ -355,8 +354,6 @@ if __name__ == '__main__':
     )
     parser.add_argument('--workers', type=int, default=mp.cpu_count(),
                         help='Number of parallel workers (1 = sequential, <=0 threads instead of processes).')
-    parser.add_argument('--voxel', type=float, default=0.05,
-                        help='Voxel size for voxel_normalize.')
     parser.add_argument('--overwrite', action='store_true',  default=False,
                         help='Re-process samples even if output already exists.')
     args = parser.parse_args()
@@ -364,6 +361,9 @@ if __name__ == '__main__':
     # collect sample‑ids
     all_raw_files = os.listdir(ORIGINAL_DIR)
     sample_ids = {f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')}
+
+    if not args.overwrite:     # filter out already processed samples
+        sample_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_pc.npy').exists()]
 
     # pick executor
     if args.workers <= 0:
@@ -374,7 +374,6 @@ if __name__ == '__main__':
         max_workers = args.workers
 
     worker_fn = partial(process_sample,
-                        voxel_size=args.voxel,
                         overwrite=args.overwrite)
 
     print(f"Processing {len(sample_ids)} samples with {max_workers} worker(s)…")
