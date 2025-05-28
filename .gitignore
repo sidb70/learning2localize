@@ -175,7 +175,8 @@ cython_debug/
 
 
 ## Project files
-*.jsonl
+
 logs/
 learning/hpo_results/
-blender/dataset/
+blender/dataset/raw/
+blender/dataset/zipped/
