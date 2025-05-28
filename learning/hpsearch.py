@@ -163,8 +163,8 @@ def train_tune(tune_cfg):
     full_cfg.update(tune_cfg)              # add sampled keys
 
     metrics = train_val(full_cfg)          
-    tune.report(val_mm=metrics["val_mm"],  # Tune minimises val_mm
-                val_loss=metrics["val_loss"])
+    tune.report({"val_mm": metrics["val_mm"], "val_loss": metrics["val_loss"]})
+
 
 # ------------------------------------------------------------------
 # Example sweep call
