@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
-STORE_IN_RAM = False ## set to false if you have <64GB RAM, as the dataset is large
+STORE_IN_RAM = True ## set to false if you have <64GB RAM, as the dataset is large
 
 def augment_bounding_box(bounding_box: np.ndarray, 
                          x_extend_prop_range=(-.1, .1), 
@@ -264,9 +264,18 @@ class ApplePointCloudDataset(Dataset):
         self.records = []
         self.voxel_size = config.get("voxel_size", 0.003)  # default voxel size for normalization
         self.percentile = config.get("percentile", 95)    # default percentile for normalization
+        self.subset_size = config.get("subset_size", 1.0)  
+
 
         with open(manifest_path) as f:
             scenes = [json.loads(line) for line in f]
+
+        # randomly select a subset of scenes if subset_size < 1.0
+        if self.subset_size < 1.0:
+            np.random.seed(config['SEED'])
+            np.random.shuffle(scenes)
+            scenes = scenes[:int(len(scenes) * self.subset_size)]
+        print(f"Loading {len(scenes)} scenes from {manifest_path} …")
 
         for scene_i, scene in enumerate(scenes):
             stem = scene["stem"]
@@ -281,8 +290,18 @@ class ApplePointCloudDataset(Dataset):
 
         if STORE_IN_RAM:
             print(f"Pre-loading {len(self.records)} apples into RAM …")
+            stems_to_records = {}
             for r in self.records:
-                r["sample"] = self._build_sample(r)
+                if r["stem"] not in stems_to_records:
+                    stems_to_records[r["stem"]] = []
+                stems_to_records[r["stem"]].append(r)
+            self.records = []
+            for stem, recs in stems_to_records.items():
+                xyz, rgb = self._load_scene_xyzrgb(stem)
+                for r in recs:
+                    r["sample"] = self._build_sample(r, xyz=xyz, rgb=rgb)
+                    self.records.append(r)
+                print("Loaded all samples for stem", stem)
 
 
     def __len__(self):
@@ -302,12 +321,12 @@ class ApplePointCloudDataset(Dataset):
             os.makedirs(os.path.dirname(zipped), exist_ok=True)
             np.savez_compressed(zipped, xyz=xyz, rgb=rgb)
             return xyz, rgb
-    def _build_sample(self, rec):
+    def _build_sample(self, rec, xyz=None, rgb=None):
         """Creates (pc, center, meta) for one apple."""
         stem, bbox, center, occ = \
             rec["stem"], rec["bbox"], rec["center"], rec["occ_rate"]
-
-        xyz, rgb  = self._load_scene_xyzrgb(stem)
+        if xyz is None or rgb is None:
+            xyz, rgb  = self._load_scene_xyzrgb(stem)
         xyzrgb    = np.concatenate((xyz, rgb), axis=2)
 
         if self.augment:
@@ -358,13 +377,16 @@ if __name__ == "__main__":
 
     # dataset / loader (batch_size 1 is easiest for variable‑length clouds)
     config = {
-        'voxel_size': 0.003,  # default voxel size for normalization
+        'voxel_size': 0.0045,  # default voxel size for normalization
         'percentile': 95,     # default percentile for normalization
+        'subset_size': 0.01,   # use all data
+        'SEED': SEED,  # for reproducibility
     }
     train_ds = ApplePointCloudDataset(
             data_root     = data_root,
             manifest_path = train_manifest,
-            augment       = True,   
+            augment       = True,
+            config        = config
             )
     # split into train/val
     train_size = int(len(train_ds) * 0.8)
@@ -375,6 +397,7 @@ if __name__ == "__main__":
             data_root     = data_root,
             manifest_path = test_manifest,
             augment       = False,   
+            config        = config
             )
     
     print("train size", len(train_ds))
