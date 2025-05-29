@@ -1,19 +1,23 @@
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 import ray
-import pytorch_lightning as pl
 import torch, numpy as np
-from datetime import datetime
 from torch.utils.data import DataLoader, random_split
 from torch import nn, optim
 from datatools import ApplePointCloudDataset, pad_collate_fn
 from models import PointNetPlusPlus
+import dotenv 
+import os 
+
+# Load environment variables from .env file one directory up
+dotenv.load_dotenv(dotenv.find_dotenv())
+PROJECT_ROOT = os.getenv("PROJECT_ROOT")
 
 
 
-DATA_ROOT = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-processed"
-TRAIN_MAN = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-v1/train.jsonl"
-TEST_MAN  = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-v1/test.jsonl"
+DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/")
+TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
+TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
 # ------------------------------------------------------------------
 def train_val(cfg: dict) -> dict:
     """
@@ -187,7 +191,7 @@ if __name__ == "__main__":
     # metrics = train_val(cfg)
     # print(metrics)
 
-    ray.init(num_cpus=12, num_gpus=1)      # or leave to auto‑detect
+    ray.init(num_cpus=32, num_gpus=2)      
 
     # ASHA: promote top configs; kill bad ones quickly
     scheduler = ASHAScheduler(
@@ -203,9 +207,9 @@ if __name__ == "__main__":
         config=SEARCH_SPACE,
         num_samples=100,                  # total trials
         scheduler=scheduler,
-        storage_path='/home/siddhartha/RIVAL/learning2localize/learning/hpo_results',
+        storage_path=os.path.join(PROJECT_ROOT,'learning/hpo_results'),
         name="apple_pointnet_hpo",
-        resources_per_trial={"cpu": 12, "gpu": 1},   # each trial gets 1 GPU
+        resources_per_trial={"cpu": 32, "gpu": 2},   # each trial gets 1 GPU
     )
 
     print("Best config:", analysis.best_config)

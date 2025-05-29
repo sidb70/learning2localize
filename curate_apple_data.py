@@ -201,11 +201,17 @@ def main(raw_dir: str, out_dir: str):
     print(f"Total kept ratio: {total_kept_samples / total_samples:.2%}")
 
 if __name__ == "__main__":
+    import os 
+    import dotenv
+    dotenv.load_dotenv(dotenv.find_dotenv())
+
+    PROJECT_ROOT = os.getenv("PROJECT_ROOT")
+    
     p = argparse.ArgumentParser()
     p.add_argument("--raw_dir", required=False,
-                   default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-processed',
+                   default=os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20-processed'),
                    help="folder that contains *_pc.npy, *_rgb0000.png ...")
     p.add_argument("--out_dir", required=False,
-                   default='/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-noaug',
+                   default=os.path.join(PROJECT_ROOT, 'blender/dataset/curated/apple-orchard-noaug'),
                    help="destination for manifest.jsonl")
     main(**vars(p.parse_args()))

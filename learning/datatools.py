@@ -7,7 +7,7 @@ import os
 import json
 import cv2
 import torch
-import pytorch_lightning as pl
+# import pytorch_lightning as pl
 from typing import Optional, Dict, Any
 from torch.utils.data import random_split
 from torch.utils.data import Dataset
@@ -259,7 +259,7 @@ def pad_collate_fn(batch):
     return batch_clouds, batch_centers, batch_mask, batch_aux
 
 class ApplePointCloudDataset(Dataset):
-    def __init__(self, data_root: str, manifest_path: str, config: dict, augment=True):
+    def __init__(self, data_root: str, manifest_path: str, config: dict={}, augment=True):
         self.root = data_root
         self.augment = augment
         self.records = []
@@ -327,94 +327,107 @@ class ApplePointCloudDataset(Dataset):
 
 
 
-class AppleDataModule(pl.LightningDataModule):
-    """Wrap the ApplePointCloudDataset into a LightningDataModule."""
+# class AppleDataModule(pl.LightningDataModule):
+#     """Wrap the ApplePointCloudDataset into a LightningDataModule."""
 
-    def __init__(
-        self,
-        data_root: str,
-        train_manifest: str,
-        test_manifest: str,
-        batch_size: int = 32,
-        num_workers: int = 12,
-        val_split: float = 0.2,
-        augment: bool = True,
-    ):
-        super().__init__()
-        self.save_hyperparameters()
+#     def __init__(
+#         self,
+#         data_root: str,
+#         train_manifest: str,
+#         test_manifest: str,
+#         batch_size: int = 32,
+#         num_workers: int = 12,
+#         val_split: float = 0.2,
+#         augment: bool = True,
+#     ):
+#         super().__init__()
+#         self.save_hyperparameters()
 
-        self.data_root = data_root
-        self.train_manifest = train_manifest
-        self.test_manifest = test_manifest
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.val_split = val_split
-        self.augment = augment
+#         self.data_root = data_root
+#         self.train_manifest = train_manifest
+#         self.test_manifest = test_manifest
+#         self.batch_size = batch_size
+#         self.num_workers = num_workers
+#         self.val_split = val_split
+#         self.augment = augment
 
-        self.train_ds = None
-        self.val_ds = None
-        self.test_ds = None
+#         self.train_ds = None
+#         self.val_ds = None
+#         self.test_ds = None
 
-    # ---------------------------------------------------------------------
-    def setup(self, stage: Optional[str] = None):
-        if stage == "fit" or stage is None:
-            full = ApplePointCloudDataset(
-                data_root=self.data_root,
-                manifest_path=self.train_manifest,
-                augment=self.augment,
-            )
-            val_len = int(len(full) * self.val_split)
-            train_len = len(full) - val_len
-            self.train_ds, self.val_ds = random_split(full, [train_len, val_len])
+#     # ---------------------------------------------------------------------
+#     def setup(self, stage: Optional[str] = None):
+#         if stage == "fit" or stage is None:
+#             full = ApplePointCloudDataset(
+#                 data_root=self.data_root,
+#                 manifest_path=self.train_manifest,
+#                 augment=self.augment,
+#             )
+#             val_len = int(len(full) * self.val_split)
+#             train_len = len(full) - val_len
+#             self.train_ds, self.val_ds = random_split(full, [train_len, val_len])
 
-        if stage == "test" or stage is None:
-            self.test_ds = ApplePointCloudDataset(
-                data_root=self.data_root,
-                manifest_path=self.test_manifest,
-                augment=False,
-            )
+#         if stage == "test" or stage is None:
+#             self.test_ds = ApplePointCloudDataset(
+#                 data_root=self.data_root,
+#                 manifest_path=self.test_manifest,
+#                 augment=False,
+#             )
 
-    # ---------------------------------------------------------------------
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_ds,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            collate_fn=pad_collate_fn,
-        )
+#     # ---------------------------------------------------------------------
+#     def train_dataloader(self):
+#         return DataLoader(
+#             self.train_ds,
+#             batch_size=self.batch_size,
+#             shuffle=True,
+#             num_workers=self.num_workers,
+#             pin_memory=True,
+#             collate_fn=pad_collate_fn,
+#         )
 
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            collate_fn=pad_collate_fn,
-        )
+#     def val_dataloader(self):
+#         return DataLoader(
+#             self.val_ds,
+#             batch_size=self.batch_size,
+#             shuffle=False,
+#             num_workers=self.num_workers,
+#             pin_memory=True,
+#             collate_fn=pad_collate_fn,
+#         )
 
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            collate_fn=pad_collate_fn,
-        )
+#     def test_dataloader(self):
+#         return DataLoader(
+#             self.test_ds,
+#             batch_size=self.batch_size,
+#             shuffle=False,
+#             num_workers=self.num_workers,
+#             pin_memory=True,
+#             collate_fn=pad_collate_fn,
+#         )
 
 
 if __name__ == "__main__":
 
     import plotly.graph_objects as go
+    import os
+    import dotenv 
 
-    data_root    = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20-processed"
-    train_manifest     = "/home/siddhartha/RIVAL/learning2localize/blender/curated/apple-orchard-v1/train.jsonl"
-    test_manifest       = "/home/siddhartha/RIVAL/learning2localize/blender/curated/apple-orchard-v1/test.jsonl"
+    dotenv.load_dotenv(dotenv.find_dotenv())
+    PROJECT_ROOT = os.getenv("PROJECT_ROOT")
+
+    SEED = 42
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+
+    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/")
+    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
+    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
 
     # dataset / loader (batch_size 1 is easiest for variable‑length clouds)
+    config = {
+        'voxel_size': 0.003,  # default voxel size for normalization
+        'percentile': 95,     # default percentile for normalization
+    }
     train_ds = ApplePointCloudDataset(
             data_root     = data_root,
             manifest_path = train_manifest,
@@ -439,7 +452,7 @@ if __name__ == "__main__":
     val_dl   = DataLoader(val_ds,   batch_size=1, shuffle=True, num_workers=12)
     test_dl  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=12)
     # ------------------------------------------------------------------
-    for scene_i, (clouds_batch, centers_batch, aux) in enumerate(train_dl):
+    for scene_i, (clouds_batch, centers_batch,mask_batch,  aux) in enumerate(train_dl):
         pc  = clouds_batch[0]     # list[(N_i,6), …]
         assert pc.shape[1] == 6, f"Expected 6 channels, got {pc.shape[1]}"
         center  = centers_batch[0].numpy()  # (M,3)
@@ -464,8 +477,8 @@ if __name__ == "__main__":
 
         # if scene_i >= 2:        # stop after 2 scenes
         #     break
-    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(val_dl):
+    for _ in val_dl:
         pass 
-    for scene_i, (clouds_batch, centers_batch, (stem_batch, bbox_batch, occ_batch)) in enumerate(test_dl):
+    for _ in test_dl:
         pass
     print("Dataloading worked")

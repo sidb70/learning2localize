@@ -13,10 +13,16 @@ from pathlib import Path
 from tqdm import tqdm        
 import os
 import argparse       
+import dotenv 
+
+dotenv.load_dotenv()
+PROJECT_ROOT = os.getenv('PROJECT_ROOT')
+
+
 
 # -------------------- PATHS --------------------
-ORIGINAL_DIR = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20')
-NEW_DIR      = Path('/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-no-flying')
+ORIGINAL_DIR = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20'))
+NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20-no-flying'))
 NEW_DIR.mkdir(exist_ok=True)
 
 

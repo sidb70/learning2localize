@@ -9,6 +9,10 @@ from typing import List, Tuple, Dict
 import pyexr
 from uuid import uuid4
 import utils
+import dotenv 
+
+dotenv.load_dotenv()
+PROJECT_ROOT = os.getenv("PROJECT_ROOT")
 
 
 class AppleSample(BaseModel):
@@ -28,7 +32,7 @@ class AppleSample(BaseModel):
                f"Apple Center: {self.apple_center}\n"
 
 def save_rgbd(res_x=1280, res_y=720,
-                         path_stem="/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard",
+                         path_stem=os.path.join(PROJECT_ROOT, 'blender/dataset/apple_orchard'),
                          frame=None):
     """
     Render once and save
@@ -401,7 +405,7 @@ def collection_loop(num_samples=10):
         num_samples (int): Number of samples to collect.
     '''
 
-    SAVE_DIR = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/apple_orchard-5-20"
+    SAVE_DIR = os.path.join(PROJECT_ROOT, "/blender/dataset/apple_orchard-5-20")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     scn = bpy.context.scene

@@ -179,51 +179,52 @@ class PointNetPlusPlus(nn.Module):
         # global_features = torch.cat([max_pool, mean_pool], dim=1)  # (B, 2048)
         global_features = max_pool  # Use only max pooling for simplicity
         return self.fc(global_features)  # (B, output_dim)
-        
-if __name__=="__main__": 
-    torch.backends.cuda.matmul.allow_tf32 = True  # Optional for performance
-    torch.backends.cudnn.benchmark = True  # Optional for performance
+if __name__ == "__main__":
 
-    torch.cuda.set_per_process_memory_fraction(1.0, 0)
-    torch.cuda.empty_cache()
+    # ------------- runtime hints -----------------------------------------
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Set max_split_size_mb to a smaller value to avoid fragmentation
-    # torch._C._cuda_set_allocator_config("max_split_size_mb:128")
+    # ------------- network -----------------------------------------------
+    model = PointNetPlusPlus(
+        input_dim=6, output_dim=3,
+        npoints=[2048, 512, 128],            # 4× reduction each stage
+        radii=[0.02, 0.05, 0.12],
+        nsamples=[64, 64, 128],
+        mlp_channels=[[128, 128, 256],
+                      [256, 256, 512],
+                      [512, 512, 1024]],
+    ).to(device).eval()
 
+    print(f"Trainable parameters: "
+          f"{sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f} M")
 
-
-    model = PointNetPlusPlus(input_dim=6).cuda()
-    model.eval()
-
-    #num params
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Number of parameters: {num_params / 1e6:.2f}M")
-    exit()
-
-    # exit()
-
-    # Warm up
-    # for _ in range(10):
-    #     pc = torch.randn(64, 8192, 6).cuda()
-    #     model(pc)
-
-    # Pre-allocate data
-    # pc = torch.randn(64, 8192, 6).cuda()
-    pc = torch.randn(1, 2**18, 6).cuda()  # 2^19 = 524288
-    times = []
-
+    # ------------- warm‑up ----------------------------------------------
+    B_warm, N_warm = 32, 8192          # <- satisfies N/4 == 2048
+    pc_warm  = torch.randn(B_warm, N_warm, 6, device=device)
+    mask_warm = torch.ones(B_warm, N_warm, dtype=torch.bool, device=device)
     for _ in range(10):
-        _ = model(pc)
+        _ = model(pc_warm, mask_warm)
+
+    # ------------- benchmark --------------------------------------------
+    B, N = 32, 8192
+    pc   = torch.randn(B, N, 6, device=device)
+    mask = torch.ones(B, N, dtype=torch.bool, device=device)
+
+    times = []
     for _ in range(100):
         torch.cuda.synchronize()
-        start = time.time()
-        output = model(pc)
+        t0 = time.time()
+        _ = model(pc, mask)                   # pass the mask every time
         torch.cuda.synchronize()
-        times.append(time.time() - start)
+        times.append(time.time() - t0)
 
-    print("Average inference time:", sum(times) / len(times))
+    print(f"Average inference time: {sum(times)/len(times):.6f} s")
+
     plt.plot(times)
-    plt.xlabel('Iteration')
-    plt.ylabel('Time (s)')
-    plt.title('Inference Time per Iteration')
-    plt.show()
+    plt.xlabel("Iteration")
+    plt.ylabel("Time (s)")
+    plt.title("Inference time per iteration")
+    plt.savefig('/home/keyi/sid/learning2localize/learning/pointnetpp_inference_time.png')
+    plt.close()

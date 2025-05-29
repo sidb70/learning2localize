@@ -19,6 +19,13 @@ from tqdm import tqdm
 from models import (
     PointNetPlusPlus,
 )
+import dotenv
+
+dotenv.load_dotenv(dotenv.find_dotenv())
+PROJECT_ROOT = os.getenv("PROJECT_ROOT")
+DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-processed")
+TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
+TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
 
 
 class Trainer:
@@ -246,6 +253,8 @@ class Trainer:
         print("Trainer object deleted.")
 
 if __name__ == "__main__":
+
+
     torch.cuda.empty_cache()
 
     # Example usage
@@ -264,7 +273,7 @@ if __name__ == "__main__":
         'log_dir': './logs',
     }
 
-    DATA_ROOT = "/home/siddhartha/RIVAL/learning2localize/blender/dataset/raw/apple_orchard-5-20-processed"
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/")
 
 
     model = PointNetPlusPlus(input_dim=6, output_dim=1).cuda()
@@ -276,14 +285,14 @@ if __name__ == "__main__":
                 nn.init.zeros_(m.bias)
     
     train_dataset = ApplePointCloudDataset(data_root=DATA_ROOT, 
-                                           manifest_path="/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-v1/train.jsonl",
+                                           manifest_path=TRAIN_MAN,
                                            config=config,
                                            augment=True)
     train_size = int(len(train_dataset) * 0.8)
     val_size = len(train_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
     test_dataset = ApplePointCloudDataset(data_root=DATA_ROOT, 
-                                          manifest_path="/home/siddhartha/RIVAL/learning2localize/blender/dataset/curated/apple-orchard-v1/test.jsonl",
+                                          manifest_path=TEST_MAN,
                                             config=config,
                                             augment=False)
 
