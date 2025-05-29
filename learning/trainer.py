@@ -23,6 +23,10 @@ import dotenv
 
 dotenv.load_dotenv(dotenv.find_dotenv())
 PROJECT_ROOT = os.getenv("PROJECT_ROOT")
+SEED = int(os.getenv("SEED", 42))
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
 DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-processed")
 TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
 TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
@@ -253,10 +257,7 @@ class Trainer:
         print("Trainer object deleted.")
 
 if __name__ == "__main__":
-
-
     torch.cuda.empty_cache()
-
     # Example usage
     config = {
         "learning_rate": 1e-2,

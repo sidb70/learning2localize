@@ -12,6 +12,11 @@ import os
 # Load environment variables from .env file one directory up
 dotenv.load_dotenv(dotenv.find_dotenv())
 PROJECT_ROOT = os.getenv("PROJECT_ROOT")
+SEED = int(os.getenv("SEED", 42))  # default to 42 if not set
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)  # set seed for all GPUs
 
 
 
