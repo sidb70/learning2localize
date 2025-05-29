@@ -64,7 +64,7 @@ def index_points(points, idx):
     B = points.shape[0]
     view_shape = list(idx.shape)
     view_shape.append(-1)
-    idx = idx.reshape(B, -1)  # ← fixed here
+    idx = idx.reshape(B, -1) 
     res = torch.gather(points, 1, idx.unsqueeze(-1).expand(-1, -1, points.shape[-1]))
     return res.view(*view_shape)
 
@@ -142,9 +142,80 @@ class PointNetSetAbstraction(nn.Module):
         new_points = torch.max(new_points, 2)[0]  # (B, D', npoint)
         new_xyz = new_xyz
         return new_xyz, new_points.permute(0, 2, 1)
+class PointNetSetAbstractionMSG(nn.Module):
+    def __init__(self, npoint, radii, nsamples, in_channel, mlp_channels_list):
+        """
+        Parameters
+        ----------
+        npoint : int
+            Number of centroids to sample (FPS).
+        radii : list of float
+            List of radii for ball query at each scale.
+        nsamples : list of int
+            Number of neighbors to query per scale.
+        in_channel : int
+            Input feature channels (excluding XYZ).
+        mlp_channels_list : list of list of int
+            One MLP configuration per scale, e.g., [[32, 32, 64], [64, 64, 128]].
+        """
+        super().__init__()
+        assert len(radii) == len(nsamples) == len(mlp_channels_list)
 
+        self.npoint = npoint
+        self.radii = radii
+        self.nsamples = nsamples
+        self.branches = nn.ModuleList()
+
+        for i in range(len(radii)):
+            mlp = mlp_channels_list[i]
+            convs = nn.Sequential()
+            last_channel = in_channel + 3  # +3 for local xyz coords
+            for j, out_channel in enumerate(mlp):
+                convs.add_module(f"conv_{j}", nn.Conv2d(last_channel, out_channel, 1))
+                convs.add_module(f"relu_{j}", nn.ReLU())
+                last_channel = out_channel
+            self.branches.append(convs)
+
+    def forward(self, xyz, points, mask):
+        """
+        xyz    : (B, N, 3)
+        points : (B, N, D) or None
+        mask   : (B, N) bool
+        Returns:
+        new_xyz    : (B, S, 3)
+        new_points : (B, S, sum_out_channels)
+        """
+        B, N, _ = xyz.shape
+        device = xyz.device
+
+        # ---- sampling --------------------------------------------------
+        fps_idx = farthest_point_sample_masked(xyz, mask, self.npoint)  # (B, S)
+        new_xyz = index_points(xyz, fps_idx)                             # (B, S, 3)
+
+        # ---- multi‑scale grouping --------------------------------------
+        grouped_outputs = []
+        for radius, nsample, mlp_conv in zip(self.radii, self.nsamples, self.branches):
+            group_idx = query_ball_point(radius, nsample, xyz, new_xyz, mask)  # (B, S, nsample)
+            grouped_xyz = index_points(xyz, group_idx)                         # (B, S, nsample, 3)
+            grouped_xyz_norm = grouped_xyz - new_xyz.unsqueeze(2)
+
+            if points is not None:
+                grouped_points = index_points(points, group_idx)               # (B, S, nsample, D)
+                grouped_features = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)
+            else:
+                grouped_features = grouped_xyz_norm                           # (B, S, nsample, 3)
+
+            # (B, S, nsample, C) → (B, C, nsample, S)
+            grouped_features = grouped_features.permute(0, 3, 2, 1)
+            out = mlp_conv(grouped_features)                                  # (B, D_out, nsample, S)
+            out = torch.max(out, dim=2)[0]                                    # (B, D_out, S)
+            grouped_outputs.append(out)
+
+        # Concatenate features from all scales
+        new_points = torch.cat(grouped_outputs, dim=1)                         # (B, sum_D_out, S)
+        return new_xyz, new_points.permute(0, 2, 1)   
 class PointNetPlusPlus(nn.Module):
-    def __init__(self, input_dim=3, output_dim=3,npoints = [1024,256,64], radii=[0.02, 0.05, 0.12], nsamples=[64, 64, 128],
+    def __init__(self, input_dim=3, output_dim=3,npoints = [1024,256,64], radii=[0.005, 0.1, 0.3], nsamples=[64, 128, 256],
                     mlp_channels=[[128, 128, 256], [256, 256, 512], [512, 512, 1024]]):
             
         super().__init__()
@@ -162,23 +233,66 @@ class PointNetPlusPlus(nn.Module):
             nn.Linear(512, output_dim)
         )
 
-    def forward(self, x, mask):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):
         xyz    = x[:, :, :3]
-        points = x[:, :, 3:] if x.size(2) > 3 else None
+        rgb = x[:, :, 3:] if x.size(2) > 3 else None
 
-        l1_xyz, l1_points = self.sa1(xyz, points, mask)
+        l1_xyz, l1_rgb= self.sa1(xyz, rgb, mask)
         # down‑sample mask to l1 (take OR over each group of 4)
         mask1 = F.max_pool1d(mask.unsqueeze(1).float(), 4).squeeze(1).bool()
 
-        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, mask1)
+        l2_xyz, l2_rgb = self.sa2(l1_xyz, l1_rgb, mask1)
         mask2 = F.max_pool1d(mask1.unsqueeze(1).float(), 4).squeeze(1).bool()
 
-        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, mask2)
-        max_pool = l3_points.max(dim=1)[0]
-        # mean_pool = l3_points.mean(dim=1)
-        # global_features = torch.cat([max_pool, mean_pool], dim=1)  # (B, 2048)
+        l3_xyz, l3_rgb = self.sa3(l2_xyz, l2_rgb, mask2)
+        max_pool = l3_rgb.max(dim=1)[0]
         global_features = max_pool  # Use only max pooling for simplicity
         return self.fc(global_features)  # (B, output_dim)
+    
+class PointNetPlusPlusMSG(PointNetPlusPlus):
+    def __init__(self, input_dim=3, output_dim=3,
+                 npoints=[1024, 256, 64],
+                 radii=[[0.005, 0.1, 0.2], [0.01, 0.2, 0.3], [0.02, 0.3, 0.5]],
+                 nsamples = [[32, 64, 128], [32, 64, 128], [32, 64, 128]],
+                    mlp_channels_list=[[ [32, 32, 64], [64, 64, 128], [64, 96, 128] ],
+                                        [ [64, 64, 128], [128, 128, 256], [128, 128, 256] ],
+                                        [ [128, 196, 256], [196, 196, 256], [196, 256, 512] ]]):
+        super().__init__(input_dim, output_dim)
+        def _total_out_channels(branches):
+            return sum(mlp[-1] for mlp in branches)
+
+        # inside __init__ of PointNetPlusPlusMSG
+        sa1_out_dim = _total_out_channels(mlp_channels_list[0])
+        sa2_out_dim = _total_out_channels(mlp_channels_list[1])
+        sa3_out_dim = _total_out_channels(mlp_channels_list[2])
+
+        self.sa1 = PointNetSetAbstractionMSG(
+            npoint=npoints[0],
+            radii=radii[0],
+            nsamples=nsamples[0],
+            in_channel=self.input_dim,
+            mlp_channels_list=mlp_channels_list[0]
+        )
+
+        self.sa2 = PointNetSetAbstractionMSG(
+            npoint=npoints[1],
+            radii=radii[1],
+            nsamples=nsamples[1],
+            in_channel=sa1_out_dim,
+            mlp_channels_list=mlp_channels_list[1]
+        )
+
+        self.sa3 = PointNetSetAbstractionMSG(
+            npoint=npoints[2],
+            radii=radii[2],
+            nsamples=nsamples[2],
+            in_channel=sa2_out_dim,
+            mlp_channels_list=mlp_channels_list[2]
+        )
+
+                 
+
+        
 if __name__ == "__main__":
 
     # ------------- runtime hints -----------------------------------------
