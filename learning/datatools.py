@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
-STORE_IN_RAM = True ## set to false if you have <64GB RAM, as the dataset is large
+STORE_IN_RAM = False ## set to false if you have <64GB RAM, as the dataset is large
 
 def augment_bounding_box(bounding_box: np.ndarray, 
                          x_extend_prop_range=(-.1, .1), 
@@ -345,6 +345,8 @@ class ApplePointCloudDataset(Dataset):
         norm_pc, norm_ctr, scale = voxel_normalize(
             pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
         pc[:, :3] = norm_pc
+        # normalize rgb channels to [0, 1]
+        pc[:, 3:6] = pc[:, 3:6] / 255.0
         center_t  = ((torch.tensor(center) - norm_ctr)/scale).float()
 
         meta = dict(stem=stem, bbox=bbox, occ_rate=occ,
@@ -379,7 +381,7 @@ if __name__ == "__main__":
     config = {
         'voxel_size': 0.0045,  # default voxel size for normalization
         'percentile': 95,     # default percentile for normalization
-        'subset_size': 0.01,   # use all data
+        # 'subset_size': 0.01,   # use all data
         'SEED': SEED,  # for reproducibility
     }
     train_ds = ApplePointCloudDataset(
@@ -412,6 +414,8 @@ if __name__ == "__main__":
         pc  = clouds_batch[0]     # list[(N_i,6), …]
         assert pc.shape[1] == 6, f"Expected 6 channels, got {pc.shape[1]}"
         center  = centers_batch[0].numpy()  # (M,3)
+        print(pc[:,3:6])
+        break
 
         # fig = go.Figure()
         # fig.add_trace(go.Scatter3d(
