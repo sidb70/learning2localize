@@ -7,11 +7,10 @@ import os
 import json
 import cv2
 import torch
-# import pytorch_lightning as pl
-from typing import Optional, Dict, Any
-from torch.utils.data import random_split
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+
+STORE_IN_RAM = False ## set to false if you have <64GB RAM, as the dataset is large
 
 def augment_bounding_box(bounding_box: np.ndarray, 
                          x_extend_prop_range=(-.1, .1), 
@@ -191,7 +190,7 @@ def voxel_normalize(points, voxel_size=0.005, percentile=95):
 TARGET_PTS = 4096                      # fixed length for every cloud
 def pad_collate_fn(batch):
     """
-    Collate variable-length point clouds to (B, 4096, D).
+    Collate variable-length point clouds to (B, TARGET_PTS, D).
 
     Returns
     -------
@@ -280,130 +279,64 @@ class ApplePointCloudDataset(Dataset):
                     "center": center
                 })
 
+        if STORE_IN_RAM:
+            print(f"Pre-loading {len(self.records)} apples into RAM …")
+            for r in self.records:
+                r["sample"] = self._build_sample(r)
+
+
     def __len__(self):
         return len(self.records)
-
-    def __getitem__(self, idx):
-        r = self.records[idx]
-        stem, bbox, center, occ_rate = r["stem"], r["bbox"], r["center"], r["occ_rate"]
-
+    
+    def _load_scene_xyzrgb(self, stem: str):
+        """Load (or zip-cache) full scene xyzrgb array."""
+        zipped = os.path.join(self.root, "zipped", f"{stem}.npz")
         try:
-            with np.load(os.path.join(self.root, 'zipped',f"{stem}.npz")) as data:
-                xyz, rgb = data["xyz"], data["rgb"]
-        except Exception as e: ## catches filenotfound and corrupted file
+            with np.load(zipped) as data:
+                return data["xyz"], data["rgb"]
+        except Exception:
             xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
-            rgb = cv2.cvtColor(cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")), cv2.COLOR_BGR2RGB)
-            os.makedirs(os.path.join(self.root, 'zipped'), exist_ok=True)
-            np.savez_compressed(os.path.join(self.root, 'zipped',f"{stem}.npz"), xyz=xyz, rgb=rgb)
-        xyzrgb = np.concatenate((xyz, rgb), axis=2)
+            rgb = cv2.cvtColor(
+                cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")),
+                cv2.COLOR_BGR2RGB)
+            os.makedirs(os.path.dirname(zipped), exist_ok=True)
+            np.savez_compressed(zipped, xyz=xyz, rgb=rgb)
+            return xyz, rgb
+    def _build_sample(self, rec):
+        """Creates (pc, center, meta) for one apple."""
+        stem, bbox, center, occ = \
+            rec["stem"], rec["bbox"], rec["center"], rec["occ_rate"]
+
+        xyz, rgb  = self._load_scene_xyzrgb(stem)
+        xyzrgb    = np.concatenate((xyz, rgb), axis=2)
+
         if self.augment:
-            bbox = augment_bounding_box(bbox, x_extend_prop_range=(-.1, .1), y_extend_prop_range=(-.1, .1))
+            bbox = augment_bounding_box(bbox)
+
         x1, y1, x2, y2 = map(int, bbox)
-        crop = xyzrgb[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
+        crop = xyzrgb[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)]
+        crop[:, :, 3:] = augment_rgb(crop[:, :, 3:]) if self.augment else crop[:, :, 3:]
 
-        assert crop.shape[1] >0 and crop.shape[0] > 0 and crop.shape[2] == 6, \
-            f"Invalid crop shape {crop.shape} for {stem} at index {idx} with bbox {bbox}"
-
-        if self.augment:
-            crop[:, :, 3:] = augment_rgb(crop[:, :, 3:])
- 
         pc = crop.reshape(-1, 6)
-        # set rows with z < .5 or z > 2.5 to NaN
-        pc = pc[~((np.abs(pc[:, 2]) < 0.45) | (np.abs(pc[:, 2]) > 2.75))]
-
-        # remove rows with NaN or Inf values
+        pc = pc[~((np.abs(pc[:,2]) < .45) | (np.abs(pc[:,2]) > 2.75))]
         pc = pc[~np.isnan(pc).any(1)]
         pc = pc[~np.isinf(pc).any(1)]
-        assert pc.shape[0] > 0, f"Empty point cloud for {stem} at index {idx}"
+        if self.augment: pc = random_dropout(pc, (0.3, 0.7))
 
-        if self.augment:
-            pc = random_dropout(pc, dropout_range=(0.3, 0.7))
-        norm_pc_3d, norm_ctr, norm_scale = voxel_normalize(pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
-        pc[:, :3] = norm_pc_3d
-        ## ## normalize center 
-        center = ((torch.tensor(center) - norm_ctr) / norm_scale).float()
+        norm_pc, norm_ctr, scale = voxel_normalize(
+            pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        pc[:, :3] = norm_pc
+        center_t  = ((torch.tensor(center) - norm_ctr)/scale).float()
 
-        return pc, center, {'stem': stem, 'bbox': bbox, 'occ_rate': occ_rate, 'norm_scale': norm_scale, 'norm_center': norm_ctr}
-
-
-
-# class AppleDataModule(pl.LightningDataModule):
-#     """Wrap the ApplePointCloudDataset into a LightningDataModule."""
-
-#     def __init__(
-#         self,
-#         data_root: str,
-#         train_manifest: str,
-#         test_manifest: str,
-#         batch_size: int = 32,
-#         num_workers: int = 12,
-#         val_split: float = 0.2,
-#         augment: bool = True,
-#     ):
-#         super().__init__()
-#         self.save_hyperparameters()
-
-#         self.data_root = data_root
-#         self.train_manifest = train_manifest
-#         self.test_manifest = test_manifest
-#         self.batch_size = batch_size
-#         self.num_workers = num_workers
-#         self.val_split = val_split
-#         self.augment = augment
-
-#         self.train_ds = None
-#         self.val_ds = None
-#         self.test_ds = None
-
-#     # ---------------------------------------------------------------------
-#     def setup(self, stage: Optional[str] = None):
-#         if stage == "fit" or stage is None:
-#             full = ApplePointCloudDataset(
-#                 data_root=self.data_root,
-#                 manifest_path=self.train_manifest,
-#                 augment=self.augment,
-#             )
-#             val_len = int(len(full) * self.val_split)
-#             train_len = len(full) - val_len
-#             self.train_ds, self.val_ds = random_split(full, [train_len, val_len])
-
-#         if stage == "test" or stage is None:
-#             self.test_ds = ApplePointCloudDataset(
-#                 data_root=self.data_root,
-#                 manifest_path=self.test_manifest,
-#                 augment=False,
-#             )
-
-#     # ---------------------------------------------------------------------
-#     def train_dataloader(self):
-#         return DataLoader(
-#             self.train_ds,
-#             batch_size=self.batch_size,
-#             shuffle=True,
-#             num_workers=self.num_workers,
-#             pin_memory=True,
-#             collate_fn=pad_collate_fn,
-#         )
-
-#     def val_dataloader(self):
-#         return DataLoader(
-#             self.val_ds,
-#             batch_size=self.batch_size,
-#             shuffle=False,
-#             num_workers=self.num_workers,
-#             pin_memory=True,
-#             collate_fn=pad_collate_fn,
-#         )
-
-#     def test_dataloader(self):
-#         return DataLoader(
-#             self.test_ds,
-#             batch_size=self.batch_size,
-#             shuffle=False,
-#             num_workers=self.num_workers,
-#             pin_memory=True,
-#             collate_fn=pad_collate_fn,
-#         )
+        meta = dict(stem=stem, bbox=bbox, occ_rate=occ,
+                    norm_center=norm_ctr, norm_scale=scale)
+        return pc.astype(np.float32), center_t, meta
+    
+    def __getitem__(self, idx):
+        rec = self.records[idx]
+        if STORE_IN_RAM:
+            return rec["sample"]          # already built & cached
+        return self._build_sample(rec)
 
 
 if __name__ == "__main__":
