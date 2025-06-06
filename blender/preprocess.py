@@ -22,7 +22,7 @@ PROJECT_ROOT = os.getenv('PROJECT_ROOT')
 
 # -------------------- PATHS --------------------
 ORIGINAL_DIR = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20'))
-NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20-no-flying'))
+NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-test'))
 NEW_DIR.mkdir(exist_ok=True)
 
 
@@ -268,7 +268,7 @@ def apply_noise(pc_im, rgb_im, instance_mask):
     """
     cnts = get_shared_contours(instance_mask)
     pc_im = add_flying_pixels(pc_im, instance_mask, cnts)
-    pc_im = add_distance_based_noise(pc_im)
+    # pc_im = add_distance_based_noise(pc_im)
     rgb_im = blur_img_edges(rgb_im, cnts)
 
     return pc_im, rgb_im
@@ -303,7 +303,7 @@ def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callab
     instance_mask = np.zeros_like(id_mask)
     unique_id = 1
     for id in visible_ids:
-        name = id_to_name.get(str(id), "Unknown")
+        name = id_to_name[str(id)]
         if conditional is None or conditional(id, name):
             visible_objs.append((id, name))
             instance_mask[id_mask == id] = unique_id
@@ -311,53 +311,112 @@ def get_visible_objects(exr_path: str, id_mapping_path: str, conditional: callab
     instance_mask = instance_mask.astype(np.uint8)
 
     return visible_objs, id_mask, instance_mask, id_to_name
+def iou(box1, box2):
+    """
+    Calculate the Intersection over Union (IoU) of two bounding boxes.
+    Args:
+        box1 (list): [x1, y1, x2, y2] coordinates of the first box.
+        box2 (list): [x1, y1, x2, y2] coordinates of the second box.
+    Returns:
+        float: IoU value between 0 and 1.
+    """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    intersection_area = max(0, x2 - x1) * max(0, y2 - y1)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    union_area = box1_area + box2_area - intersection_area
+    return intersection_area / union_area if union_area > 0 else 0
 def process_sample(sample_id: str,
+                   noise: bool = True,
                    overwrite: bool = False):
     """
     Full end-to-end pipeline for one sample-ID.
     Runs safely in a separate process.
     """
-    try:
-        # ---------- skip if already done ----------
-        if not overwrite and (NEW_DIR / f'{sample_id}_pc.npy').exists():
-            return f'skip:{sample_id}'
+    # ---------- skip if already done ----------
+    if not overwrite and (NEW_DIR / f'{sample_id}_pc.npy').exists():
+        return f'skip:{sample_id}'
 
-        sample_path = ORIGINAL_DIR / sample_id
+    sample_path = ORIGINAL_DIR / sample_id
 
-        # ---------- load ----------
-        pc_im  = np.load(str(sample_path) + "_pc.npy")
-        rgb_im = cv2.imread(str(sample_path) + "_rgb0000.png")
-        rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
+    # ---------- load ----------
+    pc_im  = np.load(str(sample_path) + "_pc.npy")
+    rgb_im = cv2.imread(str(sample_path) + "_rgb0000.png")
+    rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
 
-        visible_objs, id_mask, instance_mask, id_to_name = get_visible_objects(
-            exr_path        = str(sample_path) + '_id0000.exr',
-            id_mapping_path = str(sample_path) + '_id_map.json'
-        )
-
-        # ---------- noise ----------
+    visible_objs, id_mask, instance_mask, id_to_name = get_visible_objects(
+        exr_path        = str(sample_path) + '_id0000.exr',
+        id_mapping_path = str(sample_path) + '_id_map.json'
+    )
+    # ---------- optional processing ----------
+    if noise:
         pc_im, rgb_im = apply_noise(pc_im, rgb_im, instance_mask)
+    visible_apples, apple_id_mask, apple_instance_mask, _ = get_visible_objects(
+                    exr_path        = str(sample_path) + '_id0000.exr',
+                    id_mapping_path = str(sample_path) + '_id_map.json',
+                    conditional=lambda id, name: 'apple' in name and 'stem' not in name
+    )  
+        
+
+    # --------- identify clustered apples ----------
+    apple_data_path = ORIGINAL_DIR / f'{sample_id}_apple_data.json'
+    assert apple_data_path.exists(), f"Apple data file not found: {apple_data_path}"
+    with open(apple_data_path) as jf:
+        apple_data = {k: json.loads(v) for k, v in json.load(jf).items()}
+    clusters = []
+    for apple_key in apple_data.keys():
+        box = apple_data[apple_key]['apple_bbox']
+        apple_center = apple_data[apple_key]['apple_center']
+        x1, y1, x2, y2 = map(int, box)
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+        box1 = [x1, y1, x2, y2]
+        
+        curr_cluster= [[apple_key, box1, apple_center]]
+        for i, cluster in enumerate(clusters[:-1]):
+            for key2, box2, center2 in cluster:
+                overlap = iou(box1, box2)
+                if overlap > 0.1:  # IoU threshold
+                    clusters[i].append([apple_key, box1, apple_center])
+                    curr_cluster.append([key2, box2, center2])
+        clusters.append(curr_cluster)
+            
+    # reduce each cluster to only the apple names
+    clusters = [[apple[0] for apple in cluster] for cluster in clusters]
 
 
-        # ---------- save ----------
-        new_path = NEW_DIR / sample_id
-        np.save(str(new_path) + '_pc.npy', pc_im)
-        rgb_bgr = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(str(new_path) + '_rgb0000.png', rgb_bgr)
 
-        # copy auxiliary files (everything except pc/rgb)
-        for fname in (f for f in os.listdir(ORIGINAL_DIR) if f.startswith(sample_id)):
-            if any(k in fname for k in ('_pc.npy', '_rgb')):
-                continue
-            shutil.copy2(ORIGINAL_DIR / fname, NEW_DIR / fname)
+    # ---------- save ----------
+    new_path = NEW_DIR / sample_id
+    np.save(str(new_path) + '_pc.npy', pc_im)
+    rgb_bgr = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(new_path) + '_rgb0000.png', rgb_bgr)
+    
+    # save visible apples and apple_id_mask
+    np.savez_compressed(str(new_path) + '_instance_data.npz',
+        visible_apples=visible_apples,
+        apple_id_mask=apple_id_mask,
+        clusters=np.array(clusters, dtype=object),
+    )
+    # copy auxiliary files (everything except pc/rgb)
+    for fname in (f for f in os.listdir(ORIGINAL_DIR) if f.startswith(sample_id)):
+        if any(k in fname for k in ('_pc.npy', '_rgb')):
+            continue
+        shutil.copy2(ORIGINAL_DIR / fname, NEW_DIR / fname)
 
-        return f'done:{sample_id}'
+    return f'done:{sample_id}'
 
-    except Exception as e:
-        return f'err :{sample_id}:{e}'
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Apply synthetic sensor noise and voxel normalisation to orchard dataset.'
     )
+    parser.add_argument('--noise', type=bool, default=True,
+                        help='Apply noise to the point cloud and RGB image.')
     parser.add_argument('--workers', type=int, default=mp.cpu_count(),
                         help='Number of parallel workers (1 = sequential, <=0 threads instead of processes).')
     parser.add_argument('--overwrite', action='store_true',  default=False,
@@ -367,10 +426,14 @@ if __name__ == '__main__':
     # collect sample‑ids
     all_raw_files = os.listdir(ORIGINAL_DIR)
     sample_ids = {f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')}
+    # for i in range(len(sample_ids)):
+    #     print(process_sample(list(sample_ids)[i], noise=True, overwrite=True))
+    # exit()
 
     if not args.overwrite:     # filter out already processed samples
-        sample_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_pc.npy').exists()]
-
+        new_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_pc.npy').exists()]
+        print(f"Processing {len(new_ids)} out of {len(sample_ids)} samples, skipping {len(sample_ids) - len(new_ids)} already processed samples.")
+        sample_ids = new_ids
     # pick executor
     if args.workers <= 0:
         from concurrent.futures import ThreadPoolExecutor as Executor
@@ -380,6 +443,7 @@ if __name__ == '__main__':
         max_workers = args.workers
 
     worker_fn = partial(process_sample,
+                        noise=args.noise,
                         overwrite=args.overwrite)
 
     print(f"Processing {len(sample_ids)} samples with {max_workers} worker(s)…")
