@@ -39,80 +39,85 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
     data_js  = os.path.join(raw_dir, f"{stem}_apple_data.json")
     instance_data_path = os.path.join(raw_dir, f"{stem}_instance_data.npz")
 
-    num_samples=0
+    num_samples = 0
 
-    # -------------------- load json for every apple -----------------------
     with open(data_js) as jf:
         apple_meta = {k: json.loads(v) for k, v in json.load(jf).items()}
 
-    # -------------------- visible-pixel counts per instance --------------
     instance_data = np.load(instance_data_path, allow_pickle=True)
     vis = instance_data['visible_apples']
     id_mask = instance_data['apple_id_mask']
     clusters = instance_data['clusters']
     if isinstance(clusters, np.ndarray):
         clusters = clusters.tolist()
-    # visible_apples, id_mask2, _, _ = utils.get_visible_objects(
-    #     exr_path=id_path,
-    #     id_mapping_path=map_path,
-    #     conditional=lambda _id, name: "apple" in name and "stem" not in name
-    # )
-    # assert np.allclose(id_mask, id_mask2), "ID mask mismatch!"
 
     px_counts = {name: (id_mask == int(_id)).sum() for _id, name in vis}
 
-    boxes, centers, occ_rates = [], [], []
-    valid_indices = []
+    boxes, centers, occ_rates, valid_indices = [], [], [], []
     apple_keys = [cluster[0] for cluster in clusters]
+
     for i, apple_key in enumerate(apple_keys):
         item = apple_meta[apple_key]
         num_samples += 1
         x1_raw, y1_raw, x2_raw, y2_raw = map(int, item["apple_bbox"])
-        # clip bbox to image size
-        x1, y1, x2, y2 = max(0, x1_raw), max(0, y1_raw), max(0, x2_raw), max(0, y2_raw)
-        x2, y2 = min(x2, id_mask.shape[1]), min(y2, id_mask.shape[0])
+        x1, y1, x2, y2 = max(0, x1_raw), max(0, y1_raw), min(x2_raw, id_mask.shape[1]), min(y2_raw, id_mask.shape[0])
         box_area = abs(x2 - x1) * abs(y2 - y1)
-        if box_area < MIN_BOX_AREA:                    # degenerate bbox
+        if box_area < MIN_BOX_AREA:
             continue
-
-        # filter based on box height/width ratio. boxes that are too narrow should be avoided (too close to edge)
         height, width = abs(y2 - y1), abs(x2 - x1)
         side_ratio = min(height, width) / max(height, width)
         if side_ratio < MIN_SIDE_RATIO:
             continue
         px_ratio = px_counts[item["apple_name"]] / box_area
-        z_cam    = abs(item["apple_center"][-1])
-
+        z_cam = abs(item["apple_center"][-1])
         if px_ratio < APPLE_PIX_RATIO_THRESH or not (DEPTH_MIN <= z_cam <= DEPTH_MAX):
             continue
-
-        # ----------- FIX Y-sign that was stored as -loc_cam.y -------------
         cx, cy, cz = item["apple_center"]
         centers.append([cx, -cy, cz])
-        boxes.append([x1, y1, x2, y2])  
+        boxes.append([x1, y1, x2, y2])
         occ_rates.append(px_ratio)
         valid_indices.append(i)
+
     if not valid_indices:
         print(f"Warning: no apples kept in {stem}!")
         return None
 
-
+    # Get valid apple names (in same order as other lists)
     valid_names = [apple_keys[i] for i in valid_indices]
-    valid_clusters = [clusters[i] for i in valid_indices]
-    valid_clusters = [[apple for apple in cluster if apple in valid_names] for cluster in valid_clusters]
-    # remove empty clusters
-    valid_clusters = [cluster for cluster in valid_clusters if cluster]
-    
 
-    assert len(boxes) == len(centers) == len(occ_rates) == len(valid_clusters), \
+    # build clusters: keep only apples that passed filters, and preserve order
+    valid_clusters_raw = [clusters[i] for i in valid_indices]
+    cleaned_clusters = []
+    for cluster in valid_clusters_raw:
+        kept = [a for a in cluster if a in valid_names]
+        cleaned_clusters.append(kept)
+
+    # Map: apple name -> other apples in same (cleaned) cluster
+    cluster_dict = {
+        apple_name: [a for a in cluster if a != apple_name]
+        for apple_name, cluster in zip(valid_names, cleaned_clusters)
+    }
+
+    # Rebuild apple_meta as list aligned with valid_names
+    apple_meta_list = [apple_meta[k] for k in valid_names]
+
+    assert list(cluster_dict.keys()) == valid_names, "Cluster keys mismatch!"
+    assert len(boxes) == len(centers) == len(occ_rates) == len(valid_names) == len(apple_meta_list), \
         "Mismatch in number of kept apples!"
-    final_kept_samples = len(boxes)
-    print(f"Kept {final_kept_samples} of {num_samples} samples in {stem}")
+
+    print(f"Kept {len(valid_names)} of {num_samples} samples in {stem}")
     global total_samples, total_kept_samples
     total_samples += num_samples
-    total_kept_samples += final_kept_samples
+    total_kept_samples += len(valid_names)
 
-    return {"stem": stem, "boxes": boxes, "centers": centers, "occ_rates": occ_rates}
+    return {
+        "stem": stem,
+        "boxes": boxes,
+        "centers": centers,
+        "occ_rates": occ_rates,
+        "clusters": cluster_dict,
+        "apple_meta": apple_meta_list  # list of dicts
+    }
 
 def build_manifest(raw_dir: str, out_dir: str) -> str:
     """Run curation and write manifest.jsonl → returns its path."""

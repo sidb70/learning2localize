@@ -361,7 +361,119 @@ class ApplePointCloudDataset(Dataset):
             return rec["sample"]          # already built & cached
         return self._build_sample(rec)
 
+class AppleInstancePointCloudDataset(ApplePointCloudDataset):
+    """Dataset for apple instances"""
+    def __init__(self, data_root: str, manifest_path: str, config: dict={}, augment=True):
+        self.root = data_root
+        self.augment = augment
+        self.records = []
+        self.voxel_size = config.get("voxel_size", 0.0045)  # default voxel size for normalization
+        self.percentile = config.get("percentile", 95)    # default percentile for normalization
+        self.subset_size = config.get("subset_size", 1.0)  
 
+
+        with open(manifest_path) as f:
+            scenes = [json.loads(line) for line in f]
+
+        # randomly select a subset of scenes if subset_size < 1.0
+        if self.subset_size < 1.0:
+            np.random.seed(config['SEED'])
+            np.random.shuffle(scenes)
+            scenes = scenes[:int(len(scenes) * self.subset_size)]
+        print(f"Loading {len(scenes)} scenes from {manifest_path} …")
+
+        for scene_i, scene in enumerate(scenes):
+            stem = scene["stem"]
+            for apple_i, (bbox, center, occ_rate) in enumerate(zip(scene["boxes"], scene["centers"], scene["occ_rates"])):
+                center[1] = -center[1]  # flip y-axis to match the point cloud
+                self.records.append({
+                    "stem": stem,
+                    "bbox": scene['boxes'][apple_i],
+                    "occ_rate": scene['occ_rates'][apple_i],
+                    "center": scene['centers'][apple_i],
+                    'cluster': scene['clusters'][apple_i],
+                    'apple_meta': scene['apple_meta'][apple_i],
+                })
+
+        if STORE_IN_RAM:
+            print(f"Pre-loading {len(self.records)} apples into RAM …")
+            stems_to_records = {}
+            for r in self.records:
+                if r["stem"] not in stems_to_records:
+                    stems_to_records[r["stem"]] = []
+                stems_to_records[r["stem"]].append(r)
+            self.records = []
+            for stem, recs in stems_to_records.items():
+                xyz, rgb = self._load_scene_xyzrgb(stem)
+                for r in recs:
+                    r["sample"] = self._build_sample(r, xyz=xyz, rgb=rgb)
+                    self.records.append(r)
+                print("Loaded all samples for stem", stem)
+
+    def _load_scene_data(self, stem: str):
+        """Load (or zip-cache) full scene xyzrgb array."""
+        zipped = os.path.join(self.root, "zipped", f"{stem}.npz")
+        try:
+            with np.load(zipped) as data:
+                # print("Loaded", stem, "from zip cache")
+                return data["xyz"], data["rgb"], data["id_mask"]
+        except Exception:
+            # print("Loading", stem, "from disk")
+            xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
+            rgb = cv2.cvtColor(
+                cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")),
+                cv2.COLOR_BGR2RGB)
+            instance_data = np.load(os.path.join(self.root, f"{stem}_instance_data.npz"), allow_pickle=True)
+            id_mask = instance_data['apple_id_mask']
+            os.makedirs(os.path.dirname(zipped), exist_ok=True)
+            np.savez_compressed(zipped, xyz=xyz, rgb=rgb, id_mask=id_mask)
+            return xyz, rgb, id_mask
+
+    def _build_sample(self, rec, xyz=None, rgb=None, id_mask=None):
+        """Creates (pc, center, meta) for one apple."""
+        stem, bbox, center, occ, apple_meta, cluster = \
+            rec["stem"], rec["bbox"], rec["center"], rec["occ_rate"], rec["apple_meta"], rec["cluster"]
+        if xyz is None or rgb is None or id_mask is None:
+            xyz, rgb, id_mask = self._load_scene_data(stem)
+            
+        xyzrgb    = np.concatenate((xyz, rgb), axis=2)
+
+        apple_id = apple_meta["apple_id"]
+        if id_mask is not None:
+            # filter points by apple id
+            mask = (id_mask == apple_id)
+            xyzrgb = xyzrgb[mask]
+            if xyzrgb.shape[0] == 0:
+                raise ValueError(f"No points found for apple id {apple_id} in stem {stem}")
+        
+
+        if self.augment:
+            bbox = augment_bounding_box(bbox)
+
+        x1, y1, x2, y2 = map(int, bbox)
+        crop = xyzrgb[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)]
+        crop[:, :, 3:] = augment_rgb(crop[:, :, 3:]) if self.augment else crop[:, :, 3:]
+
+        pc = crop.reshape(-1, 6)
+        pc = pc[~((np.abs(pc[:,2]) < .45) | (np.abs(pc[:,2]) > 2.75))]
+        pc = pc[~np.isnan(pc).any(1)]
+        pc = pc[~np.isinf(pc).any(1)]
+
+
+        norm_pc, norm_ctr, scale = voxel_normalize(
+            pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        pc[:, :3] = norm_pc
+        # normalize rgb channels to [0, 1]
+        pc[:, 3:6] = pc[:, 3:6] / 255.0
+        center_t  = ((torch.tensor(center) - norm_ctr)/scale).float()
+
+        if self.augment: pc = random_dropout(pc, (0.3, 0.7))
+
+
+        meta = dict(stem=stem, bbox=bbox, occ_rate=occ,
+                    norm_center=norm_ctr, norm_scale=scale)
+        return pc.astype(np.float32), center_t, meta
+    
 if __name__ == "__main__":
 
     import plotly.graph_objects as go
