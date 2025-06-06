@@ -5,7 +5,7 @@ import torch, numpy as np
 from torch.utils.data import DataLoader, random_split
 from torch import nn, optim
 from datatools import ApplePointCloudDataset, pad_collate_fn
-from models import PointNetPlusPlus
+from models import PointNetPlusPlus, PointNetPlusPlusMSG
 import dotenv 
 import os 
 
@@ -73,7 +73,7 @@ def train_val(cfg: dict) -> dict:
     )
 
     # ------------- model / optim ----------------------------------
-    model = PointNetPlusPlus(input_dim=6, output_dim=1).to(device)
+    model = PointNetPlusPlusMSG(input_dim=6, output_dim=1).to(device)
     for m in model.modules():                      # Xavier init
         if isinstance(m, (nn.Conv2d, nn.Linear)):
             nn.init.xavier_uniform_(m.weight)
@@ -147,7 +147,7 @@ SEARCH_SPACE = {
     # ---------- data / pre‑proc -----------------------------------
     "voxel_size": tune.choice([0.001, 0.002, 0.003, 0.004, 0.005, 0.01, 0.03, 0.05]),
     # ---------- optimiser ----------------------------------------
-    "learning_rate": tune.loguniform(1e-3, 5e-2),
+    "learning_rate": tune.loguniform(1e-3, 1e-2),
     "weight_decay":  tune.loguniform(1e-6, 1e-3),
     # ---------- scheduler ----------------------------------------
     "step_size": tune.choice([1, 2, 5]),
@@ -196,7 +196,7 @@ if __name__ == "__main__":
     # metrics = train_val(cfg)
     # print(metrics)
 
-    ray.init(num_cpus=32, num_gpus=2)      
+    ray.init(num_cpus=16, num_gpus=1)      
 
     # ASHA: promote top configs; kill bad ones quickly
     scheduler = ASHAScheduler(
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         scheduler=scheduler,
         storage_path=os.path.join(PROJECT_ROOT,'learning/hpo_results'),
         name="apple_pointnet_hpo",
-        resources_per_trial={"cpu": 32, "gpu": 2},   # each trial gets 1 GPU
+        resources_per_trial={"cpu": 12, "gpu": 1},   # each trial gets 1 GPU
     )
 
     print("Best config:", analysis.best_config)

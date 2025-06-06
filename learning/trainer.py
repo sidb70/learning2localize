@@ -16,8 +16,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datatools import ApplePointCloudDataset, pad_collate_fn
 from tqdm import tqdm
+import json
 from models import (
     PointNetPlusPlus,
+    PointNetPlusPlusUnmasked
 )
 import dotenv
 
@@ -27,9 +29,6 @@ SEED = int(os.getenv("SEED", 42))
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
-DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-processed")
-TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
-TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
 
 
 class Trainer:
@@ -63,7 +62,7 @@ class Trainer:
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=True,
-            collate_fn=pad_collate_fn,  # handles variable point cloud sizes
+            # collate_fn=pad_collate_fn,  # handles variable point cloud sizes
         )
         self.val_loader = DataLoader(
             val_dataset,
@@ -71,7 +70,7 @@ class Trainer:
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
-            collate_fn=pad_collate_fn,  # handles variable point cloud sizes
+            # collate_fn=pad_collate_fn,  # handles variable point cloud sizes
         )
 
         # --- misc ---------------------------------------------------------------------------
@@ -83,11 +82,22 @@ class Trainer:
         self.writer = SummaryWriter(log_dir=self.run_dir, filename_suffix="_apple_localization")
         self.best_val_loss = float("inf")
 
+
+        # save hyperparameters
+        self.writer.add_text("hyperparameters", str(self.cfg), 0)
+        # save config dict to json
+        config_path = os.path.join(self.run_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(self.cfg, f, indent=4)
+
     # -------------------------------------------------------------------------------------
     # Scheduler factory
     # -------------------------------------------------------------------------------------
     def _build_scheduler(self, cfg):
-        sched_type = cfg.get("lr_scheduler", "plateau").lower()
+        sched_type = cfg.get("lr_scheduler", None)
+        if sched_type is None:
+            return None
+        sched_type = sched_type.lower()
         if sched_type == "step":
             return optim.lr_scheduler.StepLR(
                 self.optimizer,
@@ -120,30 +130,36 @@ class Trainer:
             epoch_z_err = 0.0
             accum_steps = 0
 
-            for i, (clouds, centers, mask,aux) in enumerate(
+            for i, (clouds, centers,aux) in enumerate(
                 tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
             ):
                 # move to device
                 clouds = clouds.to(self.device)
                 centers = centers.to(self.device)
-                mask = mask.to(self.device)
+                # mask = mask.to(self.device)
                 norm_scale = aux["norm_scale"].to(self.device).view(-1, 1)
+                occ_rate = aux["occ_rate"].to(self.device).view(-1, 1)
 
                 # build labels (only z)
                 labels = centers[:, 2].unsqueeze(1).float()
+                # concat centers and occ_rate to a labels 
+                labels = torch.cat([labels, occ_rate], dim=1)
+                labels = labels.to(self.device)
 
                 # forward / backward --------------------------------------------------
-                outputs = self.model(clouds, mask)
+                # exit()
+                outputs = self.model(clouds)#, mask)
                 loss = self.criterion(outputs, labels) 
                 if self.grad_accum_steps>0:
                     loss = loss / self.grad_accum_steps
                 loss.backward()
 
                 # real‑space error for monitoring
-                z_err_m = (outputs - labels).abs() * norm_scale
+                pred_z = outputs[:, 0].unsqueeze(1)  # only z value
+                label_z = labels[:, 0].unsqueeze(1)  # only z value
+                z_err_m = (pred_z - label_z).abs() * norm_scale
                 epoch_z_err += z_err_m.mean().item()
 
-                accum_steps += 1
                 epoch_loss += loss.item()
                 if i %10 == 0:
                     print(f"Batch {i} | Loss: {loss.item():.4f} | ZErr: {z_err_m.mean().item():.4f} m")
@@ -152,6 +168,11 @@ class Trainer:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                     accum_steps = 0
+                    print(f"Step {i} | Optimizer step taken. Grad accum steps: {self.grad_accum_steps}")
+                else:
+                    # accumulate gradients
+                    # print(f"Step {i} | Gradients accumulated. Current accum steps: {accum_steps + 1}")
+                    accum_steps += 1
 
             # catch leftover grads ----------------------------------------------------
             if accum_steps:
@@ -166,10 +187,11 @@ class Trainer:
             val_loss, val_z_err = self.validate()
 
             # scheduler step ----------------------------------------------------------
-            if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                self.scheduler.step(val_loss)
-            else:
-                self.scheduler.step()
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_loss)
+                else:
+                    self.scheduler.step()
 
             # logging ----------------------------------------------------------------
             lr = self.optimizer.param_groups[0]["lr"]
@@ -186,7 +208,7 @@ class Trainer:
             # save best ---------------------------------------------------------------
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                torch.save(self.model.state_dict(), os.path.join(self.cfg.get("log_dir", "./logs"), "best_model.pth"))
+                torch.save(self.model.state_dict(), os.path.join(self.run_dir, "best_model.pth"))
 
         self.writer.close()
         print("Training complete. Best val loss = {:.4f}".format(self.best_val_loss))
@@ -195,23 +217,30 @@ class Trainer:
     # Validation loop
     # -------------------------------------------------------------------------------------
     def validate(self):
+        print("Validating...")
         self.model.eval()
         val_loss = 0.0
         val_z_err = 0.0
         with torch.no_grad():
-            for clouds, centers, mask, aux in self.val_loader:
+            for clouds, centers, aux in self.val_loader:
                 clouds = clouds.to(self.device)
                 centers = centers.to(self.device)
-                mask = mask.to(self.device)
+                # mask = mask.to(self.device)
                 norm_scale = aux["norm_scale"].to(self.device).view(-1, 1)
+                occ_rate = aux["occ_rate"].to(self.device).view(-1, 1)
 
                 labels = centers[:, 2].unsqueeze(1).float()
-                outputs = self.model(clouds, mask)
+                labels  = torch.cat([labels, occ_rate], dim=1)
+                labels = labels.to(self.device)
+                outputs = self.model(clouds)#, mask)
 
                 loss = self.criterion(outputs, labels)
                 val_loss += loss.item()
 
-                z_err_m = (outputs - labels).abs() * norm_scale
+                # real‑space error for monitoring
+                pred_z = outputs[:, 0].unsqueeze(1)
+                label_z = labels[:, 0].unsqueeze(1)
+                z_err_m = (pred_z - label_z).abs() * norm_scale
                 val_z_err += z_err_m.mean().item()
 
         val_loss /= len(self.val_loader)
@@ -225,22 +254,22 @@ class Trainer:
         self.model.to(self.device)
         print(f"Model loaded from {path}")
     def test(self, test_dataset):
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=pad_collate_fn)
         self.model.eval()
         test_loss = 0.0
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
-                clouds, centers, aux = batch
+                clouds, centers, masks, aux = batch
                 clouds = clouds.to(self.device)
+                masks = masks.to(self.device)
                 centers = centers.to(self.device)
-                occ = aux['occ_rate'].unsqueeze(1).float().to(self.device)
+                occ_rate = aux['occ_rate'].unsqueeze(1).float().to(self.device)
 
                 # concat centers and occ_batch to a labels tensor of shape (B, 4)
-                # labels = torch.cat([centers, occ], dim=1)
-                z_vals = centers[:,2].unsqueeze(1).float()
-                labels = z_vals
+                labels = centers[:,2].unsqueeze(1).float()
+                labels = torch.cat([labels, occ_rate], dim=1)
 
-                outputs = self.model(clouds)
+                outputs = self.model(clouds, masks)
                 loss = self.criterion(outputs, labels)
                 test_loss += loss.item()
         test_loss /= len(test_loader)
@@ -257,28 +286,56 @@ class Trainer:
         print("Trainer object deleted.")
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train a PointNet++ model for apple localization.")
+    parser.add_argument("--ckpt", type=str, default=None,
+                        help="Path to a checkpoint to load the model from.")
+    args = parser.parse_args()
+
+    ckpt = args.ckpt
+
     torch.cuda.empty_cache()
     # Example usage
-    config = {
-        "learning_rate": 1e-2,
-        "lr_scheduler": "step",   # step | cosine | plateau
+    config ={
+        "learning_rate": 0.0005,
+        "lr_scheduler": "step",
+        "step_size": 5,
+        "lr_gamma": 0.65,
+        "t_max": 100,
+        "smooth_l1_beta": 0.005,
         "lr_factor": 0.5,
-        "lr_patience": 3,
-        "min_lr": 1e-6,
-        'weight_decay': 1e-4,
-        'batch_size': 16,
-        'voxel_size': 0.0025,
-        'num_epochs': 40,
-        'grad_accum_steps': 1,  # set to >1 for gradient accumulation
-        'num_workers': 12,
-        'log_dir': './logs',
+        "lr_patience": 10,
+        "min_lr": 1e-05,
+        "weight_decay": 0.0001,
+        "batch_size": 1,
+        "voxel_size": 0.0045,
+        "num_epochs": 500,
+        "grad_accum_steps": 64,
+        "num_workers": 12,
+        "log_dir": "./logs/fixed_dataset"
     }
 
-    DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/")
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
+    TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v3-fp-only-ignore-narrow-box/train.jsonl")
+    TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v3-fp-only-ignore-narrow-box/test.jsonl")
 
 
-    model = PointNetPlusPlus(input_dim=6, output_dim=1).cuda()
-    # init wieghts
+    model = PointNetPlusPlusUnmasked(input_dim=6, output_dim=2,
+                        npoints=[512, 128, 32],
+                        radii=[0.01, 0.05, 0.15],
+                        nsamples=[32, 64, 128],
+                        mlp_channels=[
+                            [64, 64, 128],
+                            [128, 128, 256], 
+                            [256, 256, 512]  
+                        ]).cuda()
+    if ckpt is not None:
+        print(f"Loading model from {ckpt}")
+        model.load_state_dict(torch.load(ckpt, map_location='cuda'))
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {num_params} trainable parameters.")
+    # init weights
     for m in model.modules():
         if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
             nn.init.xavier_uniform_(m.weight)
@@ -299,7 +356,9 @@ if __name__ == "__main__":
 
     trainer = Trainer(model, train_dataset, val_dataset, config)
     trainer.train()
+    trainer.load_model(trainer.run_dir + '/best_model.pth')
+    print("Starting testing...")
     trainer.test(test_dataset)
-    trainer.save_model(os.path.join(config['log_dir'], 'best_model.pth'))
+    # trainer.save_model(os.path.join(trainer.run_dir, 'best_model.pth'))
 
     trainer.close()

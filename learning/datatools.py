@@ -262,7 +262,7 @@ class ApplePointCloudDataset(Dataset):
         self.root = data_root
         self.augment = augment
         self.records = []
-        self.voxel_size = config.get("voxel_size", 0.003)  # default voxel size for normalization
+        self.voxel_size = config.get("voxel_size", 0.0045)  # default voxel size for normalization
         self.percentile = config.get("percentile", 95)    # default percentile for normalization
         self.subset_size = config.get("subset_size", 1.0)  
 
@@ -312,8 +312,10 @@ class ApplePointCloudDataset(Dataset):
         zipped = os.path.join(self.root, "zipped", f"{stem}.npz")
         try:
             with np.load(zipped) as data:
+                # print("Loaded", stem, "from zip cache")
                 return data["xyz"], data["rgb"]
         except Exception:
+            # print("Loading", stem, "from disk")
             xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
             rgb = cv2.cvtColor(
                 cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")),
@@ -373,9 +375,9 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/")
-    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/train.jsonl")
-    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v1/test.jsonl")
+    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
+    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/train.jsonl")
+    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/test.jsonl")
 
     # dataset / loader (batch_size 1 is easiest for variable‑length clouds)
     config = {
@@ -406,16 +408,13 @@ if __name__ == "__main__":
     print("val size", len(val_ds))
     print("test size", len(test_ds))
 
-    train_dl = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=12, collate_fn=pad_collate_fn)
+    train_dl = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=12)#, collate_fn=pad_collate_fn)
     val_dl   = DataLoader(val_ds,   batch_size=1, shuffle=True, num_workers=12)
     test_dl  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=12)
     # ------------------------------------------------------------------
-    for scene_i, (clouds_batch, centers_batch,mask_batch,  aux) in enumerate(train_dl):
-        pc  = clouds_batch[0]     # list[(N_i,6), …]
-        assert pc.shape[1] == 6, f"Expected 6 channels, got {pc.shape[1]}"
-        center  = centers_batch[0].numpy()  # (M,3)
-        print(pc[:,3:6])
-        break
+    for _ in enumerate(train_dl):
+        pass
+        
 
         # fig = go.Figure()
         # fig.add_trace(go.Scatter3d(

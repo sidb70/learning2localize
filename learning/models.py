@@ -96,10 +96,6 @@ def sample_and_group(npoint, radius, nsample, xyz, points, mask=None):
     """
     mask: (B, N) bool — 1=real point, 0=padding.
     """
-    if mask is None:
-        # fallback to old behaviour
-        B, N, _ = xyz.shape
-        mask = torch.ones(B, N, dtype=torch.bool, device=xyz.device)
 
     # ---- sampling --------------------------------------------------------
     fps_idx  = farthest_point_sample_masked(xyz, mask, npoint)      # (B,S)
@@ -187,6 +183,9 @@ class PointNetSetAbstractionMSG(nn.Module):
         """
         B, N, _ = xyz.shape
         device = xyz.device
+        if mask is None:
+            # fallback to old behaviour
+            mask = torch.ones(B, N, dtype=torch.bool, device=device)
 
         # ---- sampling --------------------------------------------------
         fps_idx = farthest_point_sample_masked(xyz, mask, self.npoint)  # (B, S)
@@ -225,30 +224,42 @@ class PointNetPlusPlus(nn.Module):
         self.sa2 = PointNetSetAbstraction(npoint=npoints[1], radius=radii[1], nsample=nsamples[1], in_channel=mlp_channels[0][-1], mlp=mlp_channels[1])
         self.sa3 = PointNetSetAbstraction(npoint=npoints[2], radius=radii[2], nsample=nsamples[2], in_channel=mlp_channels[1][-1], mlp=mlp_channels[2])
 
+        self.npoints = npoints  # Store npoints for mask calculation
         self.fc = nn.Sequential(
-            nn.Linear(1024, 1024),
+            nn.Linear(512, 1024),
             nn.ReLU(),
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Linear(512, output_dim)
         )
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        xyz    = x[:, :, :3]
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
+        xyz = x[:, :, :3]
         rgb = x[:, :, 3:] if x.size(2) > 3 else None
-
-        l1_xyz, l1_rgb= self.sa1(xyz, rgb, mask)
-        # down‑sample mask to l1 (take OR over each group of 4)
-        mask1 = F.max_pool1d(mask.unsqueeze(1).float(), 4).squeeze(1).bool()
-
+        
+        if mask is None:
+            B, N, _ = xyz.shape
+            mask = torch.ones(B, N, dtype=torch.bool, device=xyz.device)
+        
+        l1_xyz, l1_rgb = self.sa1(xyz, rgb, mask)
+        
+        # Calculate proper downsampling ratio for mask1
+        original_points = mask.size(1)  # Should be your input point count
+        l1_points = self.npoints[0]  # 512 in your new config
+        downsample_ratio1 = original_points // l1_points
+        mask1 = F.max_pool1d(mask.unsqueeze(1).float(), downsample_ratio1).squeeze(1).bool()
+        
         l2_xyz, l2_rgb = self.sa2(l1_xyz, l1_rgb, mask1)
-        mask2 = F.max_pool1d(mask1.unsqueeze(1).float(), 4).squeeze(1).bool()
-
+        
+        # Calculate proper downsampling ratio for mask2
+        downsample_ratio2 = l1_points // self.npoints[1]  # 512 // 128 = 4
+        mask2 = F.max_pool1d(mask1.unsqueeze(1).float(), downsample_ratio2).squeeze(1).bool()
+        
         l3_xyz, l3_rgb = self.sa3(l2_xyz, l2_rgb, mask2)
+        
         max_pool = l3_rgb.max(dim=1)[0]
-        global_features = max_pool  # Use only max pooling for simplicity
-        return self.fc(global_features)  # (B, output_dim)
-    
+        global_features = max_pool
+        return self.fc(global_features)
 class PointNetPlusPlusMSG(PointNetPlusPlus):
     def __init__(self, input_dim=3, output_dim=3,
                  npoints=[1024, 256, 64],
@@ -290,7 +301,103 @@ class PointNetPlusPlusMSG(PointNetPlusPlus):
             mlp_channels_list=mlp_channels_list[2]
         )
 
-                 
+
+def farthest_point_sample_unmasked(xyz, npoint):
+    B, N, _ = xyz.shape
+    centroids = torch.zeros(B, npoint, dtype=torch.long).to(xyz.device)
+    distance = torch.ones(B, N).to(xyz.device) * 1e10
+    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(xyz.device)
+    batch_indices = torch.arange(B, dtype=torch.long).to(xyz.device)
+
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
+        dist = torch.sum((xyz - centroid) ** 2, -1)
+        dist = dist.to(distance.dtype)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = torch.max(distance, -1)[1]
+    return centroids
+
+
+
+def query_ball_point_unmasked(radius, nsample, xyz, new_xyz):
+    dist = square_distance(new_xyz, xyz)
+    group_idx = dist.argsort()[:, :, :nsample]
+    return group_idx
+
+def sample_and_group_unmasked(npoint, radius, nsample, xyz, points):
+    B, N, C = xyz.shape
+    S = npoint
+    fps_idx = farthest_point_sample_unmasked(xyz, npoint)
+    new_xyz = index_points(xyz, fps_idx)
+    idx = query_ball_point_unmasked(radius, nsample, xyz, new_xyz)
+    grouped_xyz = index_points(xyz, idx)
+    grouped_xyz_norm = grouped_xyz - new_xyz.unsqueeze(2)
+    if points is not None:
+        grouped_points = index_points(points, idx)
+        new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)
+    else:
+        new_points = grouped_xyz_norm
+    return new_xyz, new_points
+
+
+class PointNetSetAbstractionUnmasked(nn.Module):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp):
+        super().__init__()
+        self.npoint = npoint
+        self.radius = radius
+        self.nsample = nsample
+        self.mlp_convs = nn.ModuleList()
+        last_channel = in_channel + 3
+        for out_channel in mlp:
+            self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
+            last_channel = out_channel
+
+    def forward(self, xyz, points):
+        new_xyz, new_points = sample_and_group_unmasked(self.npoint, self.radius, self.nsample, xyz, points)
+        new_points = new_points.permute(0, 3, 2, 1)  # (B, D, nsample, npoint)
+        new_points = new_points.float()
+        for conv in self.mlp_convs:
+            new_points = F.relu(conv(new_points))
+        new_points = torch.max(new_points, 2)[0]  # (B, D', npoint)
+        new_xyz = new_xyz
+        return new_xyz, new_points.permute(0, 2, 1)
+
+class PointNetPlusPlusUnmasked(nn.Module):
+    def __init__(self, input_dim=3, output_dim=3,npoints = [1024,256,64], radii=[0.02, 0.05, 0.12], nsamples=[64, 64, 128],
+                    mlp_channels=[[64, 64, 128], [128, 128, 256], [256, 512, 1024]]):
+            
+        super().__init__()
+        self.input_dim = input_dim - 3  # Only the additional features beyond XYZ
+
+        self.sa1 = PointNetSetAbstractionUnmasked(npoint=npoints[0], radius=radii[0], nsample=nsamples[0], in_channel=self.input_dim, mlp=mlp_channels[0])
+        self.sa2 = PointNetSetAbstractionUnmasked(npoint=npoints[1], radius=radii[1], nsample=nsamples[1], in_channel=mlp_channels[0][-1], mlp=mlp_channels[1])
+        self.sa3 = PointNetSetAbstractionUnmasked(npoint=npoints[2], radius=radii[2], nsample=nsamples[2], in_channel=mlp_channels[1][-1], mlp=mlp_channels[2])
+
+        self.fc = nn.Sequential(
+            nn.Linear(1024, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, output_dim)
+        )
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (B, N, input_dim)
+        First 3 dims are XYZ. Remaining are features (optional).
+        """
+        xyz = x[:, :, :3]
+        points = x[:, :, 3:] if x.shape[2] > 3 else None
+
+        l1_xyz, l1_points = self.sa1(xyz, points)
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        _, l3_points = self.sa3(l2_xyz, l2_points)
+        max_pool = l3_points.max(dim=1)[0]
+        mean_pool = l3_points.mean(dim=1)
+        global_features = torch.cat([max_pool, mean_pool], dim=1)  # (B, 2048)
+        return self.fc(global_features)  # (B, output_dim)
 
         
 if __name__ == "__main__":
@@ -301,36 +408,32 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ------------- network -----------------------------------------------
-    model = PointNetPlusPlus(
-        input_dim=6, output_dim=3,
-        npoints=[2048, 512, 128],            # 4× reduction each stage
-        radii=[0.02, 0.05, 0.12],
-        nsamples=[64, 64, 128],
-        mlp_channels=[[128, 128, 256],
-                      [256, 256, 512],
-                      [512, 512, 1024]],
-    ).to(device).eval()
+    model = PointNetPlusPlusUnmasked(input_dim=6, output_dim=2,
+                        npoints=[512, 128, 32],
+                        radii=[0.01, 0.05, 0.15],
+                        nsamples=[32, 64, 128],
+                        mlp_channels=[
+                            [64, 64, 128],
+                            [128, 128, 256], 
+                            [256, 256, 512]  
+                        ]).cuda().eval()
 
     print(f"Trainable parameters: "
-          f"{sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f} M")
+          f"{sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M")
 
     # ------------- warm‑up ----------------------------------------------
-    B_warm, N_warm = 32, 8192          # <- satisfies N/4 == 2048
-    pc_warm  = torch.randn(B_warm, N_warm, 6, device=device)
-    mask_warm = torch.ones(B_warm, N_warm, dtype=torch.bool, device=device)
-    for _ in range(10):
-        _ = model(pc_warm, mask_warm)
+    pcs = [torch.randn(1, torch.randint(1000, 4000, ()), 6, device=device) for _ in range(10)]
+    for i in range(10):
+        _ = model(pcs[i])
+    print("Warmup done.")
 
     # ------------- benchmark --------------------------------------------
-    B, N = 32, 8192
-    pc   = torch.randn(B, N, 6, device=device)
-    mask = torch.ones(B, N, dtype=torch.bool, device=device)
-
+    pc = torch.randn(1, 4096, 6, device=device)  # (B, N, D)
     times = []
-    for _ in range(100):
+    for i in range(100):
         torch.cuda.synchronize()
         t0 = time.time()
-        _ = model(pc, mask)                   # pass the mask every time
+        _ = model(pc)
         torch.cuda.synchronize()
         times.append(time.time() - t0)
 
