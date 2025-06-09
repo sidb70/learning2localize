@@ -18,7 +18,6 @@ Each line has:
 
 import os, json, argparse, cv2, numpy as np
 import random
-import utils
 
 APPLE_PIX_RATIO_THRESH = 0.15           ### tune
 DEPTH_MIN, DEPTH_MAX = 0.5, 2.5
@@ -115,7 +114,7 @@ def curate_scene(stem: str, raw_dir: str) -> dict | None:
         "boxes": boxes,
         "centers": centers,
         "occ_rates": occ_rates,
-        "clusters": cluster_dict,
+        "clusters": list(cluster_dict.items()),
         "apple_meta": apple_meta_list  # list of dicts
     }
 
@@ -173,37 +172,37 @@ def split_manifest(manifest_path: str,
     train_scenes, test_scenes = [], []
 
     for scene_idx, scene in enumerate(scenes):
-        boxes   = scene["boxes"]
-        centers = scene["centers"]
-        occ_rates = scene["occ_rates"]
+        # Extract all feature keys except 'stem'
+        feature_keys = [k for k in scene.keys() if k != "stem"]
+        
+        # Verify all features have the same length
+        feature_lengths = [len(scene[k]) for k in feature_keys]
+        assert all(length == feature_lengths[0] for length in feature_lengths), \
+            f"Feature length mismatch in scene {scene['stem']}: {dict(zip(feature_keys, feature_lengths))}"
+        
+        num_items = feature_lengths[0] if feature_lengths else 0
+        
+        # Initialize containers for train/test features
+        train_features = {k: [] for k in feature_keys}
+        test_features = {k: [] for k in feature_keys}
 
-        train_bxs, train_ctrs, train_occ_rates = [], [], []
-        test_bxs,  test_ctrs, test_occ_rates  = [], [], []
-
-        for j in range(len(boxes)):
+        for j in range(num_items):
             if (scene_idx, j) in train_apples:
-                train_bxs.append(boxes[j])
-                train_ctrs.append(centers[j])
-                train_occ_rates.append(occ_rates[j])
+                for k in feature_keys:
+                    train_features[k].append(scene[k][j])
             elif (scene_idx, j) in test_apples:
-                test_bxs.append(boxes[j])
-                test_ctrs.append(centers[j])
-                test_occ_rates.append(occ_rates[j])
+                for k in feature_keys:
+                    test_features[k].append(scene[k][j])
 
-        if train_bxs:
-            train_scenes.append({
-                "stem": scene["stem"],
-                "boxes": train_bxs,
-                "centers": train_ctrs,
-                "occ_rates": train_occ_rates
-            })
-        if test_bxs:
-            test_scenes.append({
-                "stem": scene["stem"],
-                "boxes": test_bxs,
-                "centers": test_ctrs,
-                "occ_rates": test_occ_rates
-            })
+        if train_features and any(train_features.values()):
+            train_scene = {"stem": scene["stem"]}
+            train_scene.update(train_features)
+            train_scenes.append(train_scene)
+            
+        if test_features and any(test_features.values()):
+            test_scene = {"stem": scene["stem"]}
+            test_scene.update(test_features)
+            test_scenes.append(test_scene)
 
     # ---------------- Write split files ----------------
     base = manifest_path.replace("manifest.jsonl", "")

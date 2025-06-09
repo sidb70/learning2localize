@@ -436,22 +436,24 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
         if xyz is None or rgb is None or id_mask is None:
             xyz, rgb, id_mask = self._load_scene_data(stem)
             
-        xyzrgb    = np.concatenate((xyz, rgb), axis=2)
+        xyzrgb    = np.concatenate((xyz, rgb), axis=2) #(720, 1280, 6)
 
         apple_id = apple_meta["apple_id"]
-        if id_mask is not None:
-            # filter points by apple id
-            mask = (id_mask == apple_id)
-            xyzrgb = xyzrgb[mask]
-            if xyzrgb.shape[0] == 0:
-                raise ValueError(f"No points found for apple id {apple_id} in stem {stem}")
+        # filter points by apple id
+        mask = (id_mask == apple_id) # (720, 1280)
+        # mask out xyzrgb. output should be (720, 1280, 6)
+        xyzrgb = xyzrgb * mask[..., np.newaxis]  # apply mask to xyzrgb
+
+        if xyzrgb.shape[0] == 0:
+            raise ValueError(f"No points found for apple id {apple_id} in stem {stem}")
         
 
         if self.augment:
             bbox = augment_bounding_box(bbox)
 
         x1, y1, x2, y2 = map(int, bbox)
-        crop = xyzrgb[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)]
+        crop = xyzrgb[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2), :]
+        assert crop.shape[0] > 0 and crop.shape[1] > 0, f"Crop is empty for bbox {bbox} in stem {stem}"
         crop[:, :, 3:] = augment_rgb(crop[:, :, 3:]) if self.augment else crop[:, :, 3:]
 
         pc = crop.reshape(-1, 6)
@@ -487,9 +489,12 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
-    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/train.jsonl")
-    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/test.jsonl")
+    # data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
+    # train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/train.jsonl")
+    # test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/test.jsonl")
+    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-test")
+    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/test/train.jsonl")
+    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/test/test.jsonl")
 
     # dataset / loader (batch_size 1 is easiest for variable‑length clouds)
     config = {
@@ -498,7 +503,7 @@ if __name__ == "__main__":
         # 'subset_size': 0.01,   # use all data
         'SEED': SEED,  # for reproducibility
     }
-    train_ds = ApplePointCloudDataset(
+    train_ds = AppleInstancePointCloudDataset(
             data_root     = data_root,
             manifest_path = train_manifest,
             augment       = True,
@@ -509,7 +514,7 @@ if __name__ == "__main__":
     val_size = len(train_ds) - train_size
     train_ds, val_ds = torch.utils.data.random_split(train_ds, [train_size, val_size])
 
-    test_ds = ApplePointCloudDataset(
+    test_ds = AppleInstancePointCloudDataset(
             data_root     = data_root,
             manifest_path = test_manifest,
             augment       = False,   
