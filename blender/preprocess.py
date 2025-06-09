@@ -14,6 +14,9 @@ from tqdm import tqdm
 import os
 import argparse       
 import dotenv 
+import gc
+import psutil
+from collections import defaultdict
 
 dotenv.load_dotenv()
 PROJECT_ROOT = os.getenv('PROJECT_ROOT')
@@ -22,7 +25,8 @@ PROJECT_ROOT = os.getenv('PROJECT_ROOT')
 
 # -------------------- PATHS --------------------
 ORIGINAL_DIR = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20'))
-NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-test'))
+# NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-test'))
+NEW_DIR = Path('/media/siddhartha/games/apple_orchard-test')
 NEW_DIR.mkdir(exist_ok=True)
 
 
@@ -331,6 +335,18 @@ def iou(box1, box2):
 
     union_area = box1_area + box2_area - intersection_area
     return intersection_area / union_area if union_area > 0 else 0
+
+class UnionFind:
+    def __init__(self):
+        self.parent = {}
+
+    def find(self, x):
+        if x != self.parent.setdefault(x, x):
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def union(self, x, y):
+        self.parent[self.find(x)] = self.find(y)
 def process_sample(sample_id: str,
                    noise: bool = True,
                    overwrite: bool = False):
@@ -360,34 +376,39 @@ def process_sample(sample_id: str,
                     exr_path        = str(sample_path) + '_id0000.exr',
                     id_mapping_path = str(sample_path) + '_id_map.json',
                     conditional=lambda id, name: 'apple' in name and 'stem' not in name
-    )  
-        
+    ) 
+
 
     # --------- identify clustered apples ----------
     apple_data_path = ORIGINAL_DIR / f'{sample_id}_apple_data.json'
     assert apple_data_path.exists(), f"Apple data file not found: {apple_data_path}"
     with open(apple_data_path) as jf:
         apple_data = {k: json.loads(v) for k, v in json.load(jf).items()}
-    clusters = []
-    for apple_key in apple_data.keys():
-        box = apple_data[apple_key]['apple_bbox']
-        apple_center = apple_data[apple_key]['apple_center']
-        x1, y1, x2, y2 = map(int, box)
-        x1, x2 = min(x1, x2), max(x1, x2)
-        y1, y2 = min(y1, y2), max(y1, y2)
-        box1 = [x1, y1, x2, y2]
-        
-        curr_cluster= [[apple_key, box1, apple_center]]
-        for i, cluster in enumerate(clusters[:-1]):
-            for key2, box2, center2 in cluster:
-                overlap = iou(box1, box2)
-                if overlap > 0.1:  # IoU threshold
-                    clusters[i].append([apple_key, box1, apple_center])
-                    curr_cluster.append([key2, box2, center2])
-        clusters.append(curr_cluster)
-            
-    # reduce each cluster to only the apple names
-    clusters = [[apple[0] for apple in cluster] for cluster in clusters]
+    uf = UnionFind()
+
+    # Union apples with IoU > 0.1
+    apple_keys = list(apple_data.keys())
+    apple_boxes = {k: v['apple_bbox'] for k, v in apple_data.items()}
+    # for i in range(len(apple_keys)):
+    #     for j in range(i + 1, len(apple_keys)):
+    #         k1, k2 = apple_keys[i], apple_keys[j]
+    #         box1 = apple_boxes[k1]
+    #         box2 = apple_boxes[k2]
+    #         if iou(box1, box2) > 0.1:
+    #             uf.union(k1, k2)
+
+    # # Build clusters
+    # cluster_map = defaultdict(list)
+    # for k in apple_keys:
+    #     root = uf.find(k)
+    #     cluster_map[root].append(k)
+
+    # clusters = list(cluster_map.values())
+    # # reduce each cluster to only the apple names
+    # clusters = [[apple for apple in cluster] for cluster in clusters]
+    # print("Clusters found:", len(clusters))
+    # print("Clusters:", clusters)
+    clusters =[]
 
 
 
@@ -408,7 +429,6 @@ def process_sample(sample_id: str,
         if any(k in fname for k in ('_pc.npy', '_rgb')):
             continue
         shutil.copy2(ORIGINAL_DIR / fname, NEW_DIR / fname)
-
     return f'done:{sample_id}'
 
 if __name__ == '__main__':
@@ -431,30 +451,29 @@ if __name__ == '__main__':
     # exit()
 
     if not args.overwrite:     # filter out already processed samples
-        new_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_pc.npy').exists()]
+        new_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_instance_data.npz').exists()]
         print(f"Processing {len(new_ids)} out of {len(sample_ids)} samples, skipping {len(sample_ids) - len(new_ids)} already processed samples.")
         sample_ids = new_ids
-    # pick executor
-    if args.workers <= 0:
-        from concurrent.futures import ThreadPoolExecutor as Executor
-        max_workers = max(1, abs(args.workers))
-    else:
-        from concurrent.futures import ProcessPoolExecutor as Executor
-        max_workers = args.workers
+
+    from concurrent.futures import ProcessPoolExecutor as Executor
+    max_workers = args.workers
 
     worker_fn = partial(process_sample,
                         noise=args.noise,
                         overwrite=args.overwrite)
 
     print(f"Processing {len(sample_ids)} samples with {max_workers} worker(s)…")
-    with Executor(max_workers=max_workers, mp_context=mp.get_context('spawn')) as ex:
-        for result in tqdm(ex.map(worker_fn, sample_ids), total=len(sample_ids)):
-            status, *info = result.split(':')
-            if status == 'err ':
-                print('⚠️ ', ':'.join(info))
-            elif status == 'skip':
-                print('⏭️ ', ':'.join(info))
-            elif status == 'done':
-                print('✅ ', ':'.join(info))
+    # run the processing in parallel
+    with Executor(max_workers=max_workers) as executor:
+        futures = [executor.submit(worker_fn, sample_id) for sample_id in sample_ids]
+        for future in tqdm(futures, desc='Processing samples'):
+            result = future.result()
+            if result.startswith('done:'):
+                print(result)
+            elif result.startswith('skip:'):
+                print(result)
+            else:
+                print(f"Unexpected result: {result}")
+                raise RuntimeError(f"Unexpected result: {result}")
 
     print('✅  All tasks complete.')
