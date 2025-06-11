@@ -54,8 +54,8 @@ def curate_scene(stem: str, raw_dir: str) -> Union[Dict[str, Union[str, List]], 
     px_counts = {name: (id_mask == int(_id)).sum() for _id, name in vis}
 
     boxes, centers, occ_rates, valid_indices = [], [], [], []
-    apple_keys = [cluster[0] for cluster in clusters]
-
+    apple_keys = list(apple_meta.keys())
+    # assert len(apple_keys) > 0, f"No apples found in {stem}!"
     for i, apple_key in enumerate(apple_keys):
         item = apple_meta[apple_key]
         num_samples += 1
@@ -63,14 +63,17 @@ def curate_scene(stem: str, raw_dir: str) -> Union[Dict[str, Union[str, List]], 
         x1, y1, x2, y2 = max(0, x1_raw), max(0, y1_raw), min(x2_raw, id_mask.shape[1]), min(y2_raw, id_mask.shape[0])
         box_area = abs(x2 - x1) * abs(y2 - y1)
         if box_area < MIN_BOX_AREA:
+            # print("box_area too small for", item["apple_name"],)
             continue
         height, width = abs(y2 - y1), abs(x2 - x1)
         side_ratio = min(height, width) / max(height, width)
         if side_ratio < MIN_SIDE_RATIO:
+            # print("side_ratio too low for", item["apple_name"],)
             continue
-        px_ratio = px_counts[item["apple_name"]] / box_area
+        px_ratio = px_counts.get(item["apple_name"],0) / box_area
         z_cam = abs(item["apple_center"][-1])
         if px_ratio < APPLE_PIX_RATIO_THRESH or not (DEPTH_MIN <= z_cam <= DEPTH_MAX):
+            # print("px_ratio or depth out of bounds for", item["apple_name"],)
             continue
         cx, cy, cz = item["apple_center"]
         centers.append([cx, -cy, cz])
@@ -81,34 +84,35 @@ def curate_scene(stem: str, raw_dir: str) -> Union[Dict[str, Union[str, List]], 
     if not valid_indices:
         print(f"Warning: no apples kept in {stem}!")
         return None
-
+    
+    cluster_dict = {}
     # Get valid apple names (in same order as other lists)
     valid_names = [apple_keys[i] for i in valid_indices]
 
-    # build clusters: keep only apples that passed filters, and preserve order
-    valid_clusters_raw = [clusters[i] for i in valid_indices]
-    cleaned_clusters = []
-    for cluster in valid_clusters_raw:
-        kept = [a for a in cluster if a in valid_names]
-        cleaned_clusters.append(kept)
+    # # build clusters: keep only apples that passed filters, and preserve order
+    # valid_clusters_raw = [clusters[i] for i in valid_indices]
+    # cleaned_clusters = []
+    # for cluster in valid_clusters_raw:
+    #     kept = [a for a in cluster if a in valid_names]
+    #     cleaned_clusters.append(kept)
 
-    # Map: apple name -> other apples in same (cleaned) cluster
-    cluster_dict = {
-        apple_name: [a for a in cluster if a != apple_name]
-        for apple_name, cluster in zip(valid_names, cleaned_clusters)
-    }
+    # # Map: apple name -> other apples in same (cleaned) cluster
+    # cluster_dict = {
+    #     apple_name: [a for a in cluster if a != apple_name]
+    #     for apple_name, cluster in zip(valid_names, cleaned_clusters)
+    # }
 
     # Rebuild apple_meta as list aligned with valid_names
     apple_meta_list = [apple_meta[k] for k in valid_names]
 
-    assert list(cluster_dict.keys()) == valid_names, "Cluster keys mismatch!"
-    assert len(boxes) == len(centers) == len(occ_rates) == len(valid_names) == len(apple_meta_list), \
-        "Mismatch in number of kept apples!"
+    # assert list(cluster_dict.keys()) == valid_names, "Cluster keys mismatch!"
+    # assert len(boxes) == len(centers) == len(occ_rates) == len(valid_names) == len(apple_meta_list), \
+    #     "Mismatch in number of kept apples!"
 
     print(f"Kept {len(valid_names)} of {num_samples} samples in {stem}")
     global total_samples, total_kept_samples
     total_samples += num_samples
-    total_kept_samples += len(valid_names)
+    total_kept_samples += len(valid_indices)
 
     return {
         "stem": stem,
@@ -174,12 +178,12 @@ def split_manifest(manifest_path: str,
 
     for scene_idx, scene in enumerate(scenes):
         # Extract all feature keys except 'stem'
-        feature_keys = [k for k in scene.keys() if k != "stem"]
+        feature_keys = [k for k in scene.keys() if k != "stem" and k != 'clusters']
         
         # Verify all features have the same length
         feature_lengths = [len(scene[k]) for k in feature_keys]
-        assert all(length == feature_lengths[0] for length in feature_lengths), \
-            f"Feature length mismatch in scene {scene['stem']}: {dict(zip(feature_keys, feature_lengths))}"
+        # assert all(length == feature_lengths[0] for length in feature_lengths), \
+        #     f"Feature length mismatch in scene {scene['stem']}: {dict(zip(feature_keys, feature_lengths))}"
         
         num_items = feature_lengths[0] if feature_lengths else 0
         

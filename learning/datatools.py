@@ -152,7 +152,34 @@ def random_dropout(point_cloud: np.ndarray, dropout_range=(0.6, 0.8)):
     dropped_point_cloud = point_cloud[mask]
 
     return dropped_point_cloud
+def inverse_distance_to_center_map(H, W):
+    """
+    Returns a (H, W) array where each pixel contains an inverse-normalized
+    Euclidean distance to the center of the bounding box.
+    Values range from 1 (center) to 0 (farthest corner).
 
+    Parameters
+    ----------
+    H : int
+        Height of the bounding box.
+    W : int
+        Width of the bounding box.
+
+    Returns
+    -------
+    dist_map : np.ndarray of shape (H, W)
+        Inverse-normalized distance from each pixel to the center.
+    """
+    y = np.arange(H).reshape(-1, 1)    # shape (H, 1)
+    x = np.arange(W).reshape(1, -1)    # shape (1, W)
+    cy = (H - 1) / 2.0
+    cx = (W - 1) / 2.0
+
+    dist_map = np.sqrt((x - cx)**2 + (y - cy)**2)
+    max_dist = np.sqrt(max(cy, H - 1 - cy)**2 + max(cx, W - 1 - cx)**2)
+
+    inverse_dist_map = 1.0 - (dist_map / max_dist)
+    return inverse_dist_map
 def voxel_normalize(points, voxel_size=0.005, percentile=95):
     """Normalize using voxel grid to handle irregular density.
     NaNs are preserved and ignored in normalization."""
@@ -391,7 +418,7 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
                     "bbox": scene['boxes'][apple_i],
                     "occ_rate": scene['occ_rates'][apple_i],
                     "center": scene['centers'][apple_i],
-                    'cluster': scene['clusters'][apple_i],
+                    # 'cluster': scene['clusters'][apple_i],
                     'apple_meta': scene['apple_meta'][apple_i],
                 })
 
@@ -431,8 +458,8 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
 
     def _build_sample(self, rec, xyz=None, rgb=None, id_mask=None):
         """Creates (pc, center, meta) for one apple."""
-        stem, bbox, center, occ, apple_meta, cluster = \
-            rec["stem"], rec["bbox"], rec["center"], rec["occ_rate"], rec["apple_meta"], rec["cluster"]
+        stem, bbox, center, occ, apple_meta = \
+            rec["stem"], rec["bbox"], rec["center"], rec["occ_rate"], rec["apple_meta"]
         if xyz is None or rgb is None or id_mask is None:
             xyz, rgb, id_mask = self._load_scene_data(stem)
             
@@ -456,7 +483,11 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
         assert crop.shape[0] > 0 and crop.shape[1] > 0, f"Crop is empty for bbox {bbox} in stem {stem}"
         crop[:, :, 3:] = augment_rgb(crop[:, :, 3:]) if self.augment else crop[:, :, 3:]
 
-        pc = crop.reshape(-1, 6)
+        dist_map = inverse_distance_to_center_map(crop.shape[0], crop.shape[1])
+        crop = np.concatenate((crop, dist_map[..., np.newaxis]), axis=2)  # add distance map as last channel
+
+        # reshape to (N, C) where N is number of points and C is number of channels
+        pc = crop.reshape(-1, crop.shape[2])
         pc = pc[~((np.abs(pc[:,2]) < .45) | (np.abs(pc[:,2]) > 2.75))]
         pc = pc[~np.isnan(pc).any(1)]
         pc = pc[~np.isinf(pc).any(1)]
