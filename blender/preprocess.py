@@ -25,8 +25,8 @@ PROJECT_ROOT = os.getenv('PROJECT_ROOT')
 
 # -------------------- PATHS --------------------
 ORIGINAL_DIR = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-5-20'))
-# NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-test'))
-NEW_DIR = Path('/media/siddhartha/games/apple_orchard-test')
+NEW_DIR      = Path(os.path.join(PROJECT_ROOT, 'blender/dataset/raw/apple_orchard-test'))
+# NEW_DIR = Path('/media/siddhartha/games/apple_orchard-test')
 NEW_DIR.mkdir(exist_ok=True)
 
 
@@ -429,6 +429,7 @@ def process_sample(sample_id: str,
         if any(k in fname for k in ('_pc.npy', '_rgb')):
             continue
         shutil.copy2(ORIGINAL_DIR / fname, NEW_DIR / fname)
+    print(f'Processed {sample_id} with {len(visible_objs)} visible objects')
     return f'done:{sample_id}'
 
 if __name__ == '__main__':
@@ -448,7 +449,7 @@ if __name__ == '__main__':
     sample_ids = {f.split('_')[0] for f in all_raw_files if f.endswith('apple_data.json')}
     # for i in range(len(sample_ids)):
     #     print(process_sample(list(sample_ids)[i], noise=True, overwrite=True))
-    # exit()
+    #     exit()
 
     if not args.overwrite:     # filter out already processed samples
         new_ids = [s for s in sample_ids if not (NEW_DIR / f'{s}_instance_data.npz').exists()]

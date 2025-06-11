@@ -18,6 +18,7 @@ Each line has:
 
 import os, json, argparse, cv2, numpy as np
 import random
+from typing import List, Dict, Union, Tuple
 
 APPLE_PIX_RATIO_THRESH = 0.15           ### tune
 DEPTH_MIN, DEPTH_MAX = 0.5, 2.5
@@ -29,7 +30,7 @@ RAND_SEED = 42
 total_samples = 0
 total_kept_samples = 0
 
-def curate_scene(stem: str, raw_dir: str) -> dict | None:
+def curate_scene(stem: str, raw_dir: str) -> Union[Dict[str, Union[str, List]], None]:
     """Return a metadata dict if at least one apple survives the filters."""
     pc_path  = os.path.join(raw_dir, f"{stem}_pc.npy")
     rgb_path = os.path.join(raw_dir, f"{stem}_rgb0000.png")
@@ -139,7 +140,7 @@ def build_manifest(raw_dir: str, out_dir: str) -> str:
 
 def split_manifest(manifest_path: str,
                    train_frac: float = 0.8,
-                   seed: int = 42) -> tuple[str, str]:
+                   seed: int = 42) -> Tuple[str, str]:
     """
     Shuffle apples and split scenes into train/test by apple count.
 
