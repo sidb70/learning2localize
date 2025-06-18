@@ -53,7 +53,7 @@ def save_rgbd(res_x=1280, res_y=720,
     scn.cycles.device = 'GPU'              
 
     scn.render.engine        = 'CYCLES'
-    scn.cycles.samples       = 1
+    scn.cycles.samples       = 16
     scn.cycles.max_bounces   = 0           # one‑sample, zero‑bounce path tracer 
 
     # ---------- compositor tree --------------------------------
@@ -397,7 +397,7 @@ def collect_scene_data(stem ):
     print("Saved apple data to ", json_path)
 
 
-def collection_loop(num_samples=10):
+def collection_loop(ds_name, num_samples=10):
     '''
     Collect data from orchard. Randomly moves the sun and camera and collects data from the scene.
 
@@ -405,8 +405,8 @@ def collection_loop(num_samples=10):
         num_samples (int): Number of samples to collect.
     '''
 
-    SAVE_DIR = os.path.join(PROJECT_ROOT, "/blender/dataset/apple_orchard-5-20")
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    save_dir = os.path.join(PROJECT_ROOT, 'blender/dataset', ds_name)
+    os.makedirs(save_dir, exist_ok=True)
 
     scn = bpy.context.scene
     for i in range(num_samples):
@@ -414,7 +414,7 @@ def collection_loop(num_samples=10):
         print(f"Sample {i+1}/{num_samples}")
 
         uid = str(uuid4())
-        stem = os.path.join(SAVE_DIR, uid) 
+        stem = os.path.join(save_dir, uid)
 
         ### Move the sun and camera to random positions
         utils.move_sun_random()
