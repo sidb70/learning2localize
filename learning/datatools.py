@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 import os
 import json
+import  matplotlib.pyplot as plt
 import cv2
 import torch
 from torch.utils.data import Dataset
@@ -152,6 +153,66 @@ def random_dropout(point_cloud: np.ndarray, dropout_range=(0.6, 0.8)):
     dropped_point_cloud = point_cloud[mask]
 
     return dropped_point_cloud
+def rotate_mask(mask, angle, center=None, scale=1.0):
+    """
+    Rotates a binary mask around its center (or given center), maintaining original size.
+    """
+    h, w = mask.shape
+    if center is None:
+        center = (w // 2, h // 2)
+        
+    M = cv2.getRotationMatrix2D(center, angle, scale)
+    rotated = cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+    return (rotated > 0).astype(np.uint8)
+
+
+def scale_mask(mask, scale_x, scale_y):
+    """
+    Scales a binary mask and pads/crops it back to original size.
+    """
+    h, w = mask.shape
+    new_w, new_h = int(w * scale_x), int(h * scale_y)
+    scaled = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+    # Pad or crop to return to original size
+    pad_x = max(w - new_w, 0)
+    pad_y = max(h - new_h, 0)
+
+    scaled = np.pad(scaled, ((pad_y // 2, pad_y - pad_y // 2),
+                             (pad_x // 2, pad_x - pad_x // 2)), mode='constant', constant_values=0)
+
+    # Crop if larger than original
+    scaled = scaled[:h, :w]
+    return (scaled > 0).astype(np.uint8)
+
+
+def translate_mask(mask, shift_x, shift_y):
+    """
+    Translates a binary mask with same output size.
+    """
+    h, w = mask.shape
+    M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+    translated = cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+    return (translated > 0).astype(np.uint8)
+
+
+def augment_mask(mask, angle_range=(-7, 7), scale_range=(0.9, 1.1), translate_range=(-4, 4)):
+    """
+    Applies random augmentations to a binary mask with shape preserved.
+    """
+    mask = mask.astype(np.uint8)  # Ensure mask is in uint8 format
+    angle = np.random.uniform(*angle_range)
+    scale_x = np.random.uniform(*scale_range)
+    scale_y = np.random.uniform(*scale_range)
+    shift_x = np.random.randint(*translate_range)
+    shift_y = np.random.randint(*translate_range)
+    
+    mask = rotate_mask(mask, angle)
+    mask = scale_mask(mask, scale_x, scale_y)
+    mask = translate_mask(mask, shift_x, shift_y)
+    
+    return mask
+
 def inverse_distance_to_center_map(H, W):
     """
     Returns a (H, W) array where each pixel contains an inverse-normalized
@@ -202,6 +263,9 @@ def voxel_normalize(points, voxel_size=0.005, percentile=95):
 
     voxel_centers = np.array(voxel_centers)
     
+    num_non_nan_points = np.sum(~np.isnan(points), axis=1)
+    assert  num_non_nan_points.sum() > 0,f"Number of non-NaN points: {num_non_nan_points.sum()}"
+
     # Center and scale using voxel centers 
     center = np.median(voxel_centers, axis=0)
     distances = np.linalg.norm(voxel_centers - center, axis=1)
@@ -343,9 +407,13 @@ class ApplePointCloudDataset(Dataset):
                 return data["xyz"], data["rgb"]
         except Exception:
             # print("Loading", stem, "from disk")
+            xyz_path = os.path.join(self.root, f"{stem}_pc.npy")
+            rgb_path = os.path.join(self.root, f"{stem}_rgb0000.png")
+            if not os.path.exists(rgb_path):
+                rgb_path = rgb_path.replace("0000", "0107")
             xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
             rgb = cv2.cvtColor(
-                cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")),
+                cv2.imread(rgb_path,),
                 cv2.COLOR_BGR2RGB)
             os.makedirs(os.path.dirname(zipped), exist_ok=True)
             np.savez_compressed(zipped, xyz=xyz, rgb=rgb)
@@ -397,6 +465,7 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
         self.voxel_size = config.get("voxel_size", 0.0045)  # default voxel size for normalization
         self.percentile = config.get("percentile", 95)    # default percentile for normalization
         self.subset_size = config.get("subset_size", 1.0)  
+        self.mask_augment = config.get("mask_augment", True)  # whether to augment masks
 
 
         with open(manifest_path) as f:
@@ -411,6 +480,8 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
 
         for scene_i, scene in enumerate(scenes):
             stem = scene["stem"]
+            if stem == '3000d9ec-5b05-4af7-8961-f669ec75de2c':
+                x=13
             for apple_i, (bbox, center, occ_rate) in enumerate(zip(scene["boxes"], scene["centers"], scene["occ_rates"])):
                 center[1] = -center[1]  # flip y-axis to match the point cloud
                 self.records.append({
@@ -439,18 +510,25 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
 
     def _load_scene_data(self, stem: str):
         """Load (or zip-cache) full scene xyzrgb array."""
-        zipped = os.path.join(self.root, "zipped", f"{stem}.npz")
+        zipped = os.path.realpath(os.path.join(self.root, "zipped", f"{stem}.npz")).replace('combined/', '')
         try:
             with np.load(zipped) as data:
                 # print("Loaded", stem, "from zip cache")
                 return data["xyz"], data["rgb"], data["id_mask"]
         except Exception:
             # print("Loading", stem, "from disk")
-            xyz = np.load(os.path.join(self.root, f"{stem}_pc.npy"))
+            xyz_path = os.path.realpath(os.path.join(self.root, f"{stem}_pc.npy")).replace('combined/', '')
+            rgb_path = xyz_path.replace('_pc.npy', '_rgb0000.png')
+            if not os.path.exists(rgb_path):
+                rgb_path = rgb_path.replace('0000', '0107')
+            if not os.path.exists(xyz_path) or not os.path.exists(rgb_path):
+                print(f"Expected paths: {xyz_path}, {rgb_path}")
+                raise FileNotFoundError(f"Data for {stem} not found in {self.root}. Please check the paths.")
+            xyz = np.load(xyz_path)
             rgb = cv2.cvtColor(
-                cv2.imread(os.path.join(self.root, f"{stem}_rgb0000.png")),
+                cv2.imread(rgb_path),
                 cv2.COLOR_BGR2RGB)
-            instance_data = np.load(os.path.join(self.root, f"{stem}_instance_data.npz"), allow_pickle=True)
+            instance_data = np.load(os.path.realpath(os.path.join(self.root, f"{stem}_instance_data.npz")).replace('combined/',''), allow_pickle=True)
             id_mask = instance_data['apple_id_mask']
             os.makedirs(os.path.dirname(zipped), exist_ok=True)
             np.savez_compressed(zipped, xyz=xyz, rgb=rgb, id_mask=id_mask)
@@ -465,9 +543,25 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
             
         xyzrgb    = np.concatenate((xyz, rgb), axis=2) #(720, 1280, 6)
 
-        apple_id = apple_meta["apple_id"]
+        apple_id = int(apple_meta["apple_id"])
+        assert apple_id in id_mask, f"Apple ID {apple_id} not found in id_mask for stem {stem}"
+        x1, y1, x2, y2 = map(int, bbox)
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+
         # filter points by apple id
-        mask = (id_mask == apple_id) # (720, 1280)
+        mask = (id_mask == apple_id) 
+        h, w = mask.shape
+        x1 = np.clip(x1, 0, w)
+        x2 = np.clip(x2, 0, w)
+        y1 = np.clip(y1, 0, h)
+        y2 = np.clip(y2, 0, h)
+        if self.augment and self.mask_augment:
+            # add noise to mask
+            mask_crop = mask[y1:y2, x1:x2]  # crop mask to bbox
+            mask_crop = augment_mask(mask_crop)
+            # apply mask to the whole image
+            mask[y1:y2, x1:x2] = mask_crop  # paste augmented mask back to the full mask
         # mask out xyzrgb. output should be (720, 1280, 6)
         xyzrgb = xyzrgb * mask[..., np.newaxis]  # apply mask to xyzrgb
 
@@ -477,14 +571,18 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
 
         if self.augment:
             bbox = augment_bounding_box(bbox)
-
         x1, y1, x2, y2 = map(int, bbox)
-        crop = xyzrgb[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2), :]
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+        x1 = np.clip(x1, 0, w)
+        x2 = np.clip(x2, 0, w)
+        y1 = np.clip(y1, 0, h)
+        y2 = np.clip(y2, 0, h)
+
+
+        crop = xyzrgb[y1:y2, x1:x2, :]
         assert crop.shape[0] > 0 and crop.shape[1] > 0, f"Crop is empty for bbox {bbox} in stem {stem}"
         crop[:, :, 3:] = augment_rgb(crop[:, :, 3:]) if self.augment else crop[:, :, 3:]
-
-        dist_map = inverse_distance_to_center_map(crop.shape[0], crop.shape[1])
-        crop = np.concatenate((crop, dist_map[..., np.newaxis]), axis=2)  # add distance map as last channel
 
         # reshape to (N, C) where N is number of points and C is number of channels
         pc = crop.reshape(-1, crop.shape[2])
@@ -493,8 +591,12 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
         pc = pc[~np.isinf(pc).any(1)]
 
 
-        norm_pc, norm_ctr, scale = voxel_normalize(
-            pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        try:
+            norm_pc, norm_ctr, scale = voxel_normalize(
+                pc[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        except AssertionError as e:
+            print(f"Error normalizing point cloud for stem {stem}, bbox {bbox}: {e}")
+            raise e
         pc[:, :3] = norm_pc
         # normalize rgb channels to [0, 1]
         pc[:, 3:6] = pc[:, 3:6] / 255.0
@@ -506,7 +608,90 @@ class AppleInstancePointCloudDataset(ApplePointCloudDataset):
         meta = dict(stem=stem, bbox=bbox, occ_rate=occ,
                     norm_center=norm_ctr, norm_scale=scale)
         return pc.astype(np.float32), center_t, meta
+class RealAppleInstancePointCloudDataset(ApplePointCloudDataset):
+    """Dataset for real apple instances"""
+    def __init__(self, data_root: str,  config: dict={}, manifest_path=None, augment=True):
+        self.voxel_size = config.get("voxel_size", 0.0045)  # default voxel size for normalization
+        self.percentile = config.get("percentile", 95)    # default percentile for normalization
+        self.subset_size = config.get("subset_size", 1.0)  
+        self.mask_augment = config.get("mask_augment", False)  # whether to augment masks
+        self.records = [] 
+
+        # load all instances from the data root
+        instances = {}
+        for file in os.listdir(data_root):
+            spl = file.split("_")
+            instance_id = spl[0] + '_' + spl[1]
+            if instance_id not in instances:
+                instances[instance_id] = {}
+                gt_depth = float(spl[2])
+                instances[instance_id]['gt_depth'] = gt_depth
+                instances[instance_id]['instance_id'] = instance_id
+
+            if 'pc_6d' in file:
+                instances[instance_id]['xyzrgb'] = os.path.join(data_root, file)
+            elif 'rgb' in file:
+                instances[instance_id]['rgb'] = os.path.join(data_root, file)
+            elif 'current_apple_mask' in file:
+                instances[instance_id]['mask'] = os.path.join(data_root, file)
+            elif 'bbox_u' in file:
+                instances[instance_id]['bbox_u'] = os.path.join(data_root, file)
+            elif 'bbox_o' in file:
+                instances[instance_id]['bbox_o'] = os.path.join(data_root, file)
+        print(f"Found {len(instances)} instances in {data_root} …")
+
+        instances = list(instances.values())
+        # randomly select a subset of instances if subset_size < 1.0
+        if self.subset_size < 1.0:
+            np.random.seed(config['SEED'])
+            np.random.shuffle(instances)
+            instances = instances[:int(len(instances) * self.subset_size)]  
+        print(f"Loading {len(instances)} instances from {data_root} …")
+        for instance in instances:
+            pc_6d = np.load(instance['xyzrgb'])
+            pc_6d[:,0:3] = pc_6d[:,0:3]/1000.0  # convert from mm to m
+            rgb = cv2.cvtColor(
+                cv2.imread(instance['rgb']),
+                cv2.COLOR_BGR2RGB)
+            mask = np.load(instance['mask'])
+            bbox_u = np.load(instance['bbox_u'])
+            self.records.append({
+                "instance_id": instance['instance_id'],
+                "pc_6d": pc_6d,
+                "rgb": rgb,
+                "mask": mask,
+                "bbox_u": bbox_u,
+                "gt_depth": instance['gt_depth']
+            })
+
+    def __len__(self):
+        return len(self.records)
     
+    def _build_sample(self, rec):
+        """Creates (pc, center, meta) for one apple."""
+        instance_id, pc_6d, rgb, mask, bbox_u, gt_depth = \
+            rec["instance_id"], rec["pc_6d"], rec["rgb"], rec["mask"], rec["bbox_u"], rec["gt_depth"]
+        
+        # normalize point cloud
+        try:
+            norm_pc, norm_ctr, scale = voxel_normalize(
+                pc_6d[:, :3], voxel_size=self.voxel_size, percentile=self.percentile)
+        except AssertionError as e:
+            print(f"Error normalizing point cloud for instance {instance_id}: {e}")
+            raise e
+        
+        return (norm_pc.astype(np.float32),gt_depth, {
+            "instance_id": instance_id,
+            "bbox_u": bbox_u,
+            "mask": mask.astype(np.float32),
+            "rgb": rgb.astype(np.float32),
+            "norm_center":  norm_ctr.astype(np.float32),
+            "norm_scale":  scale.astype(np.float32),
+        }
+        )
+
+
+
 if __name__ == "__main__":
 
     import plotly.graph_objects as go
@@ -520,12 +705,20 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
+    # real_ds = RealAppleInstancePointCloudDataset('/home/keyi/sid/learning2localize/realdata/crops')
+    # print("Real dataset size:", len(real_ds))
+    # real_dl = DataLoader(real_ds, batch_size=1, shuffle=True, num_workers=1)
+    # for i, (pc, gt_depth, meta) in enumerate(real_dl):
+    #     pass
+    # print("Real dataset loaded successfully")
+
+
     # data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
     # train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/train.jsonl")
     # test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v2-fp-only/test.jsonl")
-    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-test")
-    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/test/train.jsonl")
-    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/test/test.jsonl")
+    data_root = os.path.join(PROJECT_ROOT, "blender/dataset/raw/sample_rate16_processed")
+    train_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/sample_rate16_processed/train.jsonl")
+    test_manifest = os.path.join(PROJECT_ROOT, "blender/dataset/curated/sample_rate16_processed/test.jsonl")
 
     # dataset / loader (batch_size 1 is easiest for variable‑length clouds)
     config = {
@@ -544,6 +737,7 @@ if __name__ == "__main__":
     train_size = int(len(train_ds) * 0.8)
     val_size = len(train_ds) - train_size
     train_ds, val_ds = torch.utils.data.random_split(train_ds, [train_size, val_size])
+    val_ds.augment = False  # no augmentation for validation set
 
     test_ds = AppleInstancePointCloudDataset(
             data_root     = data_root,
