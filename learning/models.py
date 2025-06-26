@@ -397,7 +397,7 @@ class PointNetPlusPlusUnmasked(nn.Module):
         max_pool = l3_points.max(dim=1)[0]
         mean_pool = l3_points.mean(dim=1)
         global_features = torch.cat([max_pool, mean_pool], dim=1)  # (B, 2048)
-        return self.fc(global_features)  # (B, output_dim)
+        return global_features, self.fc(global_features)  # (B, output_dim)
 
         
 if __name__ == "__main__":
@@ -405,32 +405,32 @@ if __name__ == "__main__":
     # ------------- runtime hints -----------------------------------------
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:1"
 
     # ------------- network -----------------------------------------------
-    model = PointNetPlusPlusUnmasked(input_dim=6, output_dim=2,
+    model = PointNetPlusPlusUnmasked(input_dim=3, output_dim=2,
                         npoints=[512, 128, 32],
                         radii=[0.01, 0.05, 0.15],
                         nsamples=[32, 64, 128],
                         mlp_channels=[
                             [64, 64, 128],
                             [128, 128, 256], 
-                            [256, 256, 512]  
-                        ]).cuda().eval()
+                            [256, 256, 512]   
+                        ]).to(device).eval()
 
     print(f"Trainable parameters: "
           f"{sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M")
 
     # ------------- warm‑up ----------------------------------------------
-    pcs = [torch.randn(1, torch.randint(1000, 4000, ()), 6, device=device) for _ in range(10)]
+    pcs = [torch.randn(1, torch.randint(1000, 4000, ()), 3, device=device) for _ in range(10)]
     for i in range(10):
         _ = model(pcs[i])
     print("Warmup done.")
 
     # ------------- benchmark --------------------------------------------
-    pc = torch.randn(1, 4096, 6, device=device)  # (B, N, D)
+    pc = torch.randn(1, 4096, 3, device=device)  # (B, N, D)
     times = []
-    for i in range(100):
+    for i in range(500):
         torch.cuda.synchronize()
         t0 = time.time()
         _ = model(pc)
