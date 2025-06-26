@@ -14,7 +14,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from datatools import ApplePointCloudDataset, pad_collate_fn
+from datatools import (
+    ApplePointCloudDataset,
+    AppleInstancePointCloudDataset, 
+    pad_collate_fn
+    )
+
 from tqdm import tqdm
 import json
 from models import (
@@ -34,13 +39,14 @@ if torch.cuda.is_available():
 class Trainer:
     """Trainer class for training 3D NNs for apple localisation with LR scheduling."""
 
-    def __init__(self, model, train_dataset, val_dataset, config, num_workers: int = 12):
+    def __init__(self, model, train_dataset, val_dataset, config):
         # --- configuration / bookkeeping ----------------------------------------------------
         self.cfg = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.num_workers = num_workers
+        self.device = torch.device(config['device'])
+        self.num_workers = config.get("num_workers", 0)
         self.batch_size = config['batch_size']
         self.grad_accum_steps = config['grad_accum_steps']
+        self.xyz_only = config.get("xyz_only", False)
 
         # --- model / optimiser --------------------------------------------------------------
         self.model = model.to(self.device)
@@ -77,6 +83,7 @@ class Trainer:
         run_name = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + str(uuid.uuid4())[:8]
         self.run_dir = os.path.join(config.get("log_dir", "./logs"), run_name)
         os.makedirs(self.run_dir, exist_ok=True)
+        print(f"Run directory: {self.run_dir}",  flush=True)
 
         # --- tensorboard writer ---
         self.writer = SummaryWriter(log_dir=self.run_dir, filename_suffix="_apple_localization")
@@ -130,10 +137,13 @@ class Trainer:
             epoch_z_err = 0.0
             accum_steps = 0
 
-            for i, (clouds, centers,aux) in enumerate(
-                tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
-            ):
+            # for i, (clouds, centers,aux) in enumerate(
+            #     tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            # ):
+            for i, (clouds, centers,aux) in enumerate(self.train_loader):
                 # move to device
+                if self.xyz_only:
+                    clouds = clouds[:, :, :self.model.input_dim+3]
                 clouds = clouds.to(self.device)
                 centers = centers.to(self.device)
                 # mask = mask.to(self.device)
@@ -148,7 +158,7 @@ class Trainer:
 
                 # forward / backward --------------------------------------------------
                 # exit()
-                outputs = self.model(clouds)#, mask)
+                _, outputs = self.model(clouds)#, mask)
                 loss = self.criterion(outputs, labels) 
                 if self.grad_accum_steps>0:
                     loss = loss / self.grad_accum_steps
@@ -161,14 +171,15 @@ class Trainer:
                 epoch_z_err += z_err_m.mean().item()
 
                 epoch_loss += loss.item()
-                if i %10 == 0:
-                    print(f"Batch {i} | Loss: {loss.item():.4f} | ZErr: {z_err_m.mean().item():.4f} m")
+                # if i %100 == 0:
+                #     print(f"Batch {i} | Loss: {loss.item():.4f} | ZErr: {z_err_m.mean().item():.4f} m")
 
                 if accum_steps >= self.grad_accum_steps:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                     accum_steps = 0
-                    print(f"Step {i} | Optimizer step taken. Grad accum steps: {self.grad_accum_steps}")
+                    print(f"Step {i} | Optimizer step taken. Loss: {loss.item():.4f} | ZErr: {z_err_m.mean().item():.4f} m",
+                            flush=True)
                 else:
                     # accumulate gradients
                     # print(f"Step {i} | Gradients accumulated. Current accum steps: {accum_steps + 1}")
@@ -202,7 +213,8 @@ class Trainer:
             self.writer.add_scalar("LR", lr, epoch)
 
             print(
-                f"Epoch {epoch+1:03d} | LR {lr:.2e} | TrainLoss {epoch_loss:.4f} | ValLoss {val_loss:.4f} | ValZerr {val_z_err:.4f} m"
+                f"Epoch {epoch+1:03d} | LR {lr:.2e} | TrainLoss {epoch_loss:.4f} | ValLoss {val_loss:.4f} | ValZerr {val_z_err:.4f} m",
+                flush=True
             )
 
             # save best ---------------------------------------------------------------
@@ -211,18 +223,20 @@ class Trainer:
                 torch.save(self.model.state_dict(), os.path.join(self.run_dir, "best_model.pth"))
 
         self.writer.close()
-        print("Training complete. Best val loss = {:.4f}".format(self.best_val_loss))
+        print("Training complete. Best val loss = {:.4f}".format(self.best_val_loss), flush=True)
 
     # -------------------------------------------------------------------------------------
     # Validation loop
     # -------------------------------------------------------------------------------------
     def validate(self):
-        print("Validating...")
+        print("Validating...", flush=True)
         self.model.eval()
         val_loss = 0.0
         val_z_err = 0.0
         with torch.no_grad():
             for clouds, centers, aux in self.val_loader:
+                if self.xyz_only:
+                    clouds = clouds[:, :, :model.input_dim+3]
                 clouds = clouds.to(self.device)
                 centers = centers.to(self.device)
                 # mask = mask.to(self.device)
@@ -232,7 +246,7 @@ class Trainer:
                 labels = centers[:, 2].unsqueeze(1).float()
                 labels  = torch.cat([labels, occ_rate], dim=1)
                 labels = labels.to(self.device)
-                outputs = self.model(clouds)#, mask)
+                _, outputs = self.model(clouds)#, mask)
 
                 loss = self.criterion(outputs, labels)
                 val_loss += loss.item()
@@ -248,11 +262,11 @@ class Trainer:
         return val_loss, val_z_err
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)
-        print(f"Model saved to {path}")
+        print(f"Model saved to {path}",  flush=True)
     def load_model(self, path):
         self.model.load_state_dict(torch.load(path))
         self.model.to(self.device)
-        print(f"Model loaded from {path}")
+        print(f"Model loaded from {path}",  flush=True)
     def test(self, test_dataset):
         test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=pad_collate_fn)
         self.model.eval()
@@ -260,6 +274,8 @@ class Trainer:
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
                 clouds, centers, masks, aux = batch
+                if self.xyz_only:
+                    clouds = clouds[:, :, self.model.input_dim+3]
                 clouds = clouds.to(self.device)
                 masks = masks.to(self.device)
                 centers = centers.to(self.device)
@@ -269,21 +285,21 @@ class Trainer:
                 labels = centers[:,2].unsqueeze(1).float()
                 labels = torch.cat([labels, occ_rate], dim=1)
 
-                outputs = self.model(clouds, masks)
+                _, outputs = self.model(clouds, masks)
                 loss = self.criterion(outputs, labels)
                 test_loss += loss.item()
         test_loss /= len(test_loader)
-        print(f"Test loss: {test_loss:.4f}")
+        print(f"Test loss: {test_loss:.4f}", flush=True)
     def log_metrics(self, metrics):
         for key, value in metrics.items():
             self.writer.add_scalar(key, value, self.epoch)
-        print(f"Metrics logged: {metrics}")
+        print(f"Metrics logged: {metrics}", flush=True)
     def close(self):
         self.writer.close()
-        print("TensorBoard writer closed.")
+        print("TensorBoard writer closed.", flush=True)
     def __del__(self):
         self.close()
-        print("Trainer object deleted.")
+        print("Trainer object deleted.", flush=True)
 
 if __name__ == "__main__":
     import argparse
@@ -298,9 +314,13 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     # Example usage
     config ={
+        "SEED": SEED,
+        "device": "cuda",
+        "xyz_only": True,
+        "mask_augment": True,  # whether to use mask augmentations
         "learning_rate": 0.0005,
         "lr_scheduler": "step",
-        "step_size": 5,
+        "step_size": 15,
         "lr_gamma": 0.65,
         "t_max": 100,
         "smooth_l1_beta": 0.005,
@@ -312,16 +332,17 @@ if __name__ == "__main__":
         "voxel_size": 0.0045,
         "num_epochs": 500,
         "grad_accum_steps": 64,
-        "num_workers": 12,
-        "log_dir": "./logs/fixed_dataset"
+        "num_workers": 0,
+        "log_dir": "./logs/bigger-dataset",
+        "description": "Big data + XYZ ONLY + Mask Augment + Full Noise DS + Instance Point clouds with longer step size."
     }
 
-    DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/apple_orchard-5-20-fp-only")
-    TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v3-fp-only-ignore-narrow-box/train.jsonl")
-    TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/apple-orchard-v3-fp-only-ignore-narrow-box/test.jsonl")
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "blender/dataset/raw/sample_rate16_processed")
+    TRAIN_MAN = os.path.join(PROJECT_ROOT, "blender/dataset/curated/sample_rate16_processed/train.jsonl")
+    TEST_MAN  = os.path.join(PROJECT_ROOT, "blender/dataset/curated/sample_rate16_processed/test.jsonl")
 
-
-    model = PointNetPlusPlusUnmasked(input_dim=6, output_dim=2,
+    input_dim = 6 - 3*config['xyz_only']  # xyz + rgb if not xyz_only
+    model = PointNetPlusPlusUnmasked(input_dim=input_dim, output_dim=2,
                         npoints=[512, 128, 32],
                         radii=[0.01, 0.05, 0.15],
                         nsamples=[32, 64, 128],
@@ -329,27 +350,29 @@ if __name__ == "__main__":
                             [64, 64, 128],
                             [128, 128, 256], 
                             [256, 256, 512]  
-                        ]).cuda()
+                        ]).to(config['device'])
     if ckpt is not None:
         print(f"Loading model from {ckpt}")
-        model.load_state_dict(torch.load(ckpt, map_location='cuda'))
+        model.load_state_dict(torch.load(ckpt, map_location=config['device'], weights_only=True))
+    else:    
+        for m in model.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model has {num_params} trainable parameters.")
     # init weights
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-    
-    train_dataset = ApplePointCloudDataset(data_root=DATA_ROOT, 
+
+    train_dataset = AppleInstancePointCloudDataset(data_root=DATA_ROOT, 
                                            manifest_path=TRAIN_MAN,
                                            config=config,
                                            augment=True)
     train_size = int(len(train_dataset) * 0.8)
     val_size = len(train_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
-    test_dataset = ApplePointCloudDataset(data_root=DATA_ROOT, 
+    test_dataset = AppleInstancePointCloudDataset(data_root=DATA_ROOT, 
                                           manifest_path=TEST_MAN,
                                             config=config,
                                             augment=False)
